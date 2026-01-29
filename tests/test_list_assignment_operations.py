@@ -4,6 +4,7 @@ This module tests the new generic list assignment functionality using list_name 
 parameters for add_todo, update_todo, add_project, and update_project operations.
 """
 
+import asyncio
 import os
 import sys
 
@@ -471,9 +472,9 @@ def test_mcp_server_add_task_with_list_id(test_namespace):
     """Test that MCP server add_task function properly passes list_id to AppleScript bridge."""
     from things3_mcp.fast_server import add_new_project, add_task
 
-    # Create test project using MCP server
+    # Create test project using MCP server (async functions require asyncio.run)
     project_title = f"{test_namespace}-MCP Test Project {generate_random_string(5)}"
-    project_result = add_new_project(title=project_title)
+    project_result = asyncio.run(add_new_project(title=project_title))
 
     # Extract project ID from result
     import re
@@ -485,7 +486,7 @@ def test_mcp_server_add_task_with_list_id(test_namespace):
     try:
         # Create todo using MCP server function with list_id - this should work but currently fails
         todo_title = f"{test_namespace}-MCP Todo via list_id {generate_random_string(5)}"
-        result = add_task(title=todo_title, list_id=project_id)
+        result = asyncio.run(add_task(title=todo_title, list_id=project_id))
 
         # Extract the todo ID from the result message
         match = re.search(r"\(ID: ([^)]+)\)", result)
@@ -507,12 +508,12 @@ def test_mcp_server_priority_list_id_over_list_title(test_namespace):
     """Test that when both list_id and list_title are provided, list_id takes priority."""
     from things3_mcp.fast_server import add_new_project, add_task
 
-    # Create two test projects
+    # Create two test projects (async functions require asyncio.run)
     project1_title = f"{test_namespace}-MCP Project 1 {generate_random_string(5)}"
-    project1_result = add_new_project(title=project1_title)
+    project1_result = asyncio.run(add_new_project(title=project1_title))
 
     project2_title = f"{test_namespace}-MCP Project 2 {generate_random_string(5)}"
-    project2_result = add_new_project(title=project2_title)
+    project2_result = asyncio.run(add_new_project(title=project2_title))
 
     # Extract project IDs
     import re
@@ -527,7 +528,7 @@ def test_mcp_server_priority_list_id_over_list_title(test_namespace):
         # Create todo with BOTH list_id (project1) and list_title (project2)
         # The list_id should take priority
         todo_title = f"{test_namespace}-MCP Todo priority test {generate_random_string(5)}"
-        result = add_task(title=todo_title, list_id=project1_id, list_title=project2_title)
+        result = asyncio.run(add_task(title=todo_title, list_id=project1_id, list_title=project2_title))
 
         # Extract the todo ID from the result message
         match = re.search(r"\(ID: ([^)]+)\)", result)
@@ -663,7 +664,8 @@ def test_error_prefix_detection(test_namespace):
     ]
 
     for scenario in error_scenarios:
-        result = add_task(title=title + str(error_scenarios.index(scenario)), **scenario)
+        # Note: add_task is async, so we need asyncio.run()
+        result = asyncio.run(add_task(title=title + str(error_scenarios.index(scenario)), **scenario))
 
         # Result should be a string
         assert isinstance(result, str), f"Result should be string for scenario: {scenario}"
@@ -694,21 +696,22 @@ def test_success_message_location_information(test_namespace):
     created_todos = []
 
     try:
+        import re
+
         # Test 1: Todo created in project should show project location
-        result1 = add_task(title=f"{test_namespace}-Project Todo {generate_random_string(5)}", list_id=project_id)
+        # Note: add_task is async, so we need asyncio.run()
+        result1 = asyncio.run(add_task(title=f"{test_namespace}-Project Todo {generate_random_string(5)}", list_id=project_id))
         assert "✅ Successfully created todo:" in result1, "Should have success message"
         assert "Project:" in result1, f"Should show project location: {result1}"
         assert project_title in result1, f"Should include project name: {result1}"
 
         # Extract todo ID for cleanup
-        import re
-
         match = re.search(r"ID: ([^)]+)\)", result1)
         if match:
             created_todos.append(match.group(1))
 
         # Test 2: Todo created in area should show area location
-        result2 = add_task(title=f"{test_namespace}-Area Todo {generate_random_string(5)}", list_id=area_id)
+        result2 = asyncio.run(add_task(title=f"{test_namespace}-Area Todo {generate_random_string(5)}", list_id=area_id))
         assert "✅ Successfully created todo:" in result2, "Should have success message"
         assert "Area:" in result2, f"Should show area location: {result2}"
         assert area_name in result2, f"Should include area name: {result2}"
@@ -719,7 +722,7 @@ def test_success_message_location_information(test_namespace):
             created_todos.append(match.group(1))
 
         # Test 3: Todo created in Inbox should show list location
-        result3 = add_task(title=f"{test_namespace}-Inbox Todo {generate_random_string(5)}")
+        result3 = asyncio.run(add_task(title=f"{test_namespace}-Inbox Todo {generate_random_string(5)}"))
         assert "✅ Successfully created todo:" in result3, "Should have success message"
         # Should show some location info (List: or similar)
         assert "in " in result3, f"Should show location information: {result3}"
@@ -730,7 +733,7 @@ def test_success_message_location_information(test_namespace):
             created_todos.append(match.group(1))
 
         # Test 4: Project created in area should show area location
-        result4 = add_new_project(title=f"{test_namespace}-Area Project {generate_random_string(5)}", area_id=area_id)
+        result4 = asyncio.run(add_new_project(title=f"{test_namespace}-Area Project {generate_random_string(5)}", area_id=area_id))
         assert "✅ Successfully created project:" in result4, "Should have success message"
         assert "Area:" in result4, f"Should show area location: {result4}"
         assert area_name in result4, f"Should include area name: {result4}"
@@ -741,7 +744,7 @@ def test_success_message_location_information(test_namespace):
             delete_project_by_id(match.group(1))
 
         # Test 5: Project created without area should show inbox location
-        result5 = add_new_project(title=f"{test_namespace}-Inbox Project {generate_random_string(5)}")
+        result5 = asyncio.run(add_new_project(title=f"{test_namespace}-Inbox Project {generate_random_string(5)}"))
         assert "✅ Successfully created project:" in result5, "Should have success message"
         assert "in List: Inbox" in result5, f"Should show inbox location: {result5}"
 

@@ -1,11 +1,14 @@
 """Things MCP Server implementation using the FastMCP pattern."""
 
+import asyncio
 import json
 import random
 import traceback
+from collections.abc import Callable
+from typing import Any
 
 import things
-from mcp.server.fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 
 from .applescript_bridge import (
     add_project,
@@ -55,13 +58,243 @@ def preprocess_array_params(**kwargs):
     return result
 
 
+# Session state cache helpers for v3
+async def get_cached_areas(ctx: Context) -> list:
+    """Get areas list, cached for the session.
+
+    Avoids redundant Things database lookups when resolving area_title parameters.
+    Cache is automatically scoped to the MCP session.
+    """
+    areas = await ctx.get_state("areas_cache")
+    if areas is None:
+        areas = things.areas()
+        await ctx.set_state("areas_cache", areas)
+        logger.debug(f"Cached {len(areas)} areas for session")
+    return areas
+
+
+async def get_cached_projects(ctx: Context) -> list:
+    """Get projects list, cached for the session.
+
+    Avoids redundant Things database lookups when resolving list_title parameters.
+    Cache is automatically scoped to the MCP session.
+    """
+    projects = await ctx.get_state("projects_cache")
+    if projects is None:
+        projects = things.projects()
+        await ctx.set_state("projects_cache", projects)
+        logger.debug(f"Cached {len(projects)} projects for session")
+    return projects
+
+
+async def invalidate_projects_cache(ctx: Context) -> None:
+    """Invalidate the projects cache after creating a new project."""
+    await ctx.set_state("projects_cache", None)
+    logger.debug("Invalidated projects cache")
+
+
+async def _fetch_projects_with_cache(ctx: Context | None, include_items: bool) -> list:
+    cache_key = f"projects_cache_include_items_{include_items}"
+
+    # Phase 1 diagnostic logging: understand why caching isn't working
+    logger.debug("[CACHE] _fetch_projects_with_cache called: ctx=%s, key=%s", ctx is not None, cache_key)
+
+    if ctx is not None:
+        # Log session info if available
+        try:
+            # FastMCP 3.0 Context may have request_id or session info
+            ctx_info = f"ctx_type={type(ctx).__name__}"
+            if hasattr(ctx, "request_id"):
+                ctx_info += f", request_id={ctx.request_id}"
+            if hasattr(ctx, "session"):
+                ctx_info += f", session={ctx.session}"
+            logger.debug("[CACHE] Context info: %s", ctx_info)
+        except Exception as e:
+            logger.debug("[CACHE] Could not inspect context: %s", e)
+
+        cached = await ctx.get_state(cache_key)
+        if cached is not None:
+            logger.debug("[CACHE] CACHE HIT for %s (%d items)", cache_key, len(cached))
+            return cached
+        else:
+            logger.debug("[CACHE] CACHE MISS for %s (state returned None)", cache_key)
+    else:
+        logger.debug("[CACHE] Context is None - cannot use session cache")
+
+    projects = things.projects(include_items=include_items)
+    if ctx is not None:
+        await ctx.set_state(cache_key, projects)
+        logger.debug("[CACHE] Cache STORED for %s (%d items)", cache_key, len(projects))
+    return projects
+
+
+async def _fetch_areas_with_cache(ctx: Context | None, include_items: bool) -> list:
+    cache_key = f"areas_cache_include_items_{include_items}"
+
+    # Phase 1 diagnostic logging
+    logger.debug("[CACHE] _fetch_areas_with_cache called: ctx=%s, key=%s", ctx is not None, cache_key)
+
+    if ctx is not None:
+        cached = await ctx.get_state(cache_key)
+        if cached is not None:
+            logger.debug("[CACHE] CACHE HIT for %s (%d items)", cache_key, len(cached))
+            return cached
+        else:
+            logger.debug("[CACHE] CACHE MISS for %s", cache_key)
+    else:
+        logger.debug("[CACHE] Context is None for areas cache")
+
+    areas = things.areas(include_items=include_items)
+    if ctx is not None:
+        await ctx.set_state(cache_key, areas)
+        logger.debug("[CACHE] Cache STORED for %s (%d items)", cache_key, len(areas))
+    return areas
+
+
+def _build_cache_key(prefix: str, params: dict[str, Any]) -> str:
+    if not params:
+        return f"{prefix}:empty"
+    serialised = json.dumps(params, sort_keys=True, default=str)
+    return f"{prefix}:{serialised}"
+
+
+async def _fetch_search_cache(
+    ctx: Context | None,
+    cache_key: str,
+    loader: Callable[[], Any],
+    label: str | None = None,
+) -> Any:
+    display_label = label or cache_key
+
+    # Phase 1 diagnostic logging
+    logger.debug("[CACHE] _fetch_search_cache called: ctx=%s, key=%s", ctx is not None, display_label)
+
+    if ctx is None:
+        logger.debug("[CACHE] Context is None - bypassing cache for %s", display_label)
+        return loader()
+
+    state = await ctx.get_state("search_cache")
+    cache = dict(state) if isinstance(state, dict) else {}
+    logger.debug("[CACHE] search_cache state: %d keys in cache", len(cache))
+
+    if cache_key in cache:
+        logger.debug("[CACHE] CACHE HIT for %s", display_label)
+        return cache[cache_key]
+
+    logger.debug("[CACHE] CACHE MISS for %s", display_label)
+    result = loader()
+    cache[cache_key] = result
+    await ctx.set_state("search_cache", cache)
+    logger.debug("[CACHE] Cache STORED for %s (now %d keys)", display_label, len(cache))
+    return result
+
+
+async def _build_tags_response(include_items: bool, ctx: Context | None) -> str:
+    cache_key = f"get_tags:{include_items}"
+    tags = await _fetch_search_cache(ctx, cache_key, lambda: things.tags(), label="get_tags")
+
+    if not tags:
+        return "No tags found"
+
+    formatted_tags = [format_tag(tag, include_items) for tag in tags]
+    return "\n\n---\n\n".join(formatted_tags)
+
+
+async def _build_tagged_items_response(tag: str, ctx: Context | None) -> str:
+    # Phase 2: Cache formatted response
+    response_cache_key = f"tagged_items_response_{tag}"
+
+    if ctx is not None:
+        cached_response = await ctx.get_state(response_cache_key)
+        if cached_response is not None:
+            logger.debug("[CACHE] RESPONSE CACHE HIT for tagged_items:%s", tag)
+            return cached_response
+        logger.debug("[CACHE] RESPONSE CACHE MISS for tagged_items:%s", tag)
+
+    cache_key = _build_cache_key("tagged_items", {"tag": tag})
+    todos = await _fetch_search_cache(
+        ctx,
+        cache_key,
+        lambda: things.todos(tag=tag, include_items=True),
+        label=f"tagged_items:{tag}",
+    )
+
+    if not todos:
+        return f"No items found with tag '{tag}'"
+
+    formatted_todos = [format_todo(todo) for todo in todos]
+    response = "\n\n---\n\n".join(formatted_todos)
+
+    if ctx is not None:
+        await ctx.set_state(response_cache_key, response)
+        logger.debug("[CACHE] RESPONSE CACHE STORED for tagged_items:%s", tag)
+
+    return response
+
+
+def _validate_period(period: str) -> bool:
+    return bool(period and any(period.endswith(unit) for unit in ["d", "w", "m", "y"]))
+
+
+async def _build_recent_response(period: str, ctx: Context | None) -> str:
+    if not _validate_period(period):
+        raise ValueError("Period must be in format '3d', '1w', '2m', '1y'")
+
+    # Phase 2: Cache the formatted response to avoid O(n) formatter DB calls
+    response_cache_key = f"recent_response_{period}"
+
+    if ctx is not None:
+        cached_response = await ctx.get_state(response_cache_key)
+        if cached_response is not None:
+            logger.debug("[CACHE] RESPONSE CACHE HIT for %s", response_cache_key)
+            return cached_response
+        logger.debug("[CACHE] RESPONSE CACHE MISS for %s", response_cache_key)
+
+    cache_key = _build_cache_key("get_recent", {"period": period})
+    items = await _fetch_search_cache(
+        ctx,
+        cache_key,
+        lambda: things.last(period, include_items=True),
+        label=f"get_recent:{period}",
+    )
+
+    if not items:
+        return f"No items found in the last {period}"
+
+    formatted_items: list[str] = []
+    for item in items:
+        if item.get("type") == "to-do":
+            formatted_items.append(format_todo(item))
+        elif item.get("type") == "project":
+            formatted_items.append(format_project(item, include_items=False))
+
+    response = "\n\n---\n\n".join(formatted_items)
+
+    if ctx is not None:
+        await ctx.set_state(response_cache_key, response)
+        logger.debug("[CACHE] RESPONSE CACHE STORED for %s", response_cache_key)
+
+    return response
+
+
 # Create the FastMCP server
 mcp = FastMCP("Things", instructions="Interact with the Things 3 task management app")
+
+
+def register_tool(name: str):
+    """Register a tool while preserving the original callable for internal reuse."""
+
+    def decorator(func):
+        mcp.tool(name=name)(func)
+        return func
+
+    return decorator
+
 
 # LIST VIEWS
 
 
-@mcp.tool(name="get_inbox")
+@register_tool(name="get_inbox")
 def get_inbox() -> str:
     """Get todos from Inbox."""
     import time
@@ -84,7 +317,7 @@ def get_inbox() -> str:
         raise
 
 
-@mcp.tool(name="get_today")
+@register_tool(name="get_today")
 def get_today() -> str:
     """Get todos due today."""
     import time
@@ -168,7 +401,7 @@ def get_today() -> str:
         raise
 
 
-@mcp.tool(name="get_upcoming")
+@register_tool(name="get_upcoming")
 def get_upcoming() -> str:
     """Get all upcoming todos (those with a start date in the future)."""
     todos = things.upcoming(include_items=True)
@@ -180,7 +413,7 @@ def get_upcoming() -> str:
     return "\n\n---\n\n".join(formatted_todos)
 
 
-@mcp.tool(name="get_anytime")
+@register_tool(name="get_anytime")
 def get_anytime() -> str:
     """Get all todos from Anytime list. Note that this will return an extensive list of tasks. It is generally recommended to use get_todos with filters or search_todos instead."""
     todos = things.anytime(include_items=True)
@@ -192,7 +425,7 @@ def get_anytime() -> str:
     return "\n\n---\n\n".join(formatted_todos)
 
 
-@mcp.tool(name="get_random_inbox")
+@register_tool(name="get_random_inbox")
 def get_random_inbox(count: int = 5) -> str:
     """Get a random sample of todos from Inbox.
 
@@ -232,7 +465,7 @@ def get_random_inbox(count: int = 5) -> str:
         raise
 
 
-@mcp.tool(name="get_random_anytime")
+@register_tool(name="get_random_anytime")
 def get_random_anytime(count: int = 5) -> str:
     """Get a random sample of items from the Anytime list.
 
@@ -262,7 +495,7 @@ def get_random_anytime(count: int = 5) -> str:
     return "\n\n---\n\n".join(formatted)
 
 
-@mcp.tool(name="get_someday")
+@register_tool(name="get_someday")
 def get_someday() -> str:
     """Get todos from Someday list."""
     todos = things.someday(include_items=True)
@@ -274,7 +507,7 @@ def get_someday() -> str:
     return "\n\n---\n\n".join(formatted_todos)
 
 
-@mcp.tool(name="get_logbook")
+@register_tool(name="get_logbook")
 def get_logbook(period: str = "7d", limit: int = 50) -> str:
     """Get completed todos from Logbook, defaults to last 7 days.
 
@@ -337,7 +570,7 @@ def get_logbook(period: str = "7d", limit: int = 50) -> str:
         raise
 
 
-@mcp.tool(name="get_trash")
+@register_tool(name="get_trash")
 def get_trash() -> str:
     """Get trashed todos."""
     todos = things.trash(include_items=True)
@@ -349,7 +582,7 @@ def get_trash() -> str:
     return "\n\n---\n\n".join(formatted_todos)
 
 
-@mcp.tool(name="get_todos")
+@register_tool(name="get_todos")
 def get_todos(project_uuid: str | None = None) -> str:
     """Get todos from Things, optionally filtered by project.
 
@@ -371,7 +604,7 @@ def get_todos(project_uuid: str | None = None) -> str:
     return "\n\n---\n\n".join(formatted_todos)
 
 
-@mcp.tool(name="get_random_todos")
+@register_tool(name="get_random_todos")
 def get_random_todos(project_uuid: str | None = None, count: int = 5) -> str:
     """Get a random sample of todos, optionally filtered by project.
 
@@ -404,7 +637,42 @@ def get_random_todos(project_uuid: str | None = None, count: int = 5) -> str:
     return "\n\n---\n\n".join(formatted)
 
 
-@mcp.tool(name="get_projects")
+async def _build_projects_response(include_items: bool, ctx: Context | None) -> str:
+    # Phase 2: Cache the FINAL formatted response, not just raw data
+    # This eliminates O(n) formatter database calls on cache hits
+    response_cache_key = f"projects_response_{include_items}"
+
+    if ctx is not None:
+        cached_response = await ctx.get_state(response_cache_key)
+        if cached_response is not None:
+            logger.debug("[CACHE] RESPONSE CACHE HIT for %s", response_cache_key)
+            return cached_response
+        logger.debug("[CACHE] RESPONSE CACHE MISS for %s", response_cache_key)
+
+    # Fetch raw data (still cached separately for other uses)
+    projects = await _fetch_projects_with_cache(ctx, include_items)
+
+    if not projects:
+        return "No projects found"
+
+    # Build formatted response (expensive due to formatter DB calls)
+    formatted_projects = [format_project(project, include_items) for project in projects]
+    response = "\n\n---\n\n".join(formatted_projects)
+
+    # Cache the formatted response
+    if ctx is not None:
+        await ctx.set_state(response_cache_key, response)
+        logger.debug("[CACHE] RESPONSE CACHE STORED for %s", response_cache_key)
+
+    return response
+
+
+@register_tool(name="get_projects")
+async def _get_projects_tool(include_items: bool = False, ctx: Context | None = None) -> str:
+    """Get all projects from Things via MCP (cached per session)."""
+    return await _build_projects_response(include_items, ctx)
+
+
 def get_projects(include_items: bool = False) -> str:
     """Get all projects from Things.
 
@@ -412,16 +680,41 @@ def get_projects(include_items: bool = False) -> str:
     ----
         include_items: Include tasks within projects.
     """
-    projects = things.projects()
-
-    if not projects:
-        return "No projects found"
-
-    formatted_projects = [format_project(project, include_items) for project in projects]
-    return "\n\n---\n\n".join(formatted_projects)
+    return asyncio.run(_build_projects_response(include_items, None))
 
 
-@mcp.tool(name="get_areas")
+async def _build_areas_response(include_items: bool, ctx: Context | None) -> str:
+    # Phase 2: Cache the FINAL formatted response
+    response_cache_key = f"areas_response_{include_items}"
+
+    if ctx is not None:
+        cached_response = await ctx.get_state(response_cache_key)
+        if cached_response is not None:
+            logger.debug("[CACHE] RESPONSE CACHE HIT for %s", response_cache_key)
+            return cached_response
+        logger.debug("[CACHE] RESPONSE CACHE MISS for %s", response_cache_key)
+
+    areas = await _fetch_areas_with_cache(ctx, include_items)
+
+    if not areas:
+        return "No areas found"
+
+    formatted_areas = [format_area(area, include_items) for area in areas]
+    response = "\n\n---\n\n".join(formatted_areas)
+
+    if ctx is not None:
+        await ctx.set_state(response_cache_key, response)
+        logger.debug("[CACHE] RESPONSE CACHE STORED for %s", response_cache_key)
+
+    return response
+
+
+@register_tool(name="get_areas")
+async def _get_areas_tool(include_items: bool = False, ctx: Context | None = None) -> str:
+    """Get all areas from Things via MCP (cached per session)."""
+    return await _build_areas_response(include_items, ctx)
+
+
 def get_areas(include_items: bool = False) -> str:
     """Get all areas from Things. Use these names when assigning a task or project to an area.
 
@@ -429,19 +722,18 @@ def get_areas(include_items: bool = False) -> str:
     ----
         include_items: Include projects and tasks within areas
     """
-    areas = things.areas()
-
-    if not areas:
-        return "No areas found"
-
-    formatted_areas = [format_area(area, include_items) for area in areas]
-    return "\n\n---\n\n".join(formatted_areas)
+    return asyncio.run(_build_areas_response(include_items, None))
 
 
 # TAG OPERATIONS
 
 
-@mcp.tool(name="get_tags")
+@register_tool(name="get_tags")
+async def _get_tags_tool(include_items: bool = False, ctx: Context | None = None) -> str:
+    """Get all tags via MCP (cached per session)."""
+    return await _build_tags_response(include_items, ctx)
+
+
 def get_tags(include_items: bool = False) -> str:
     """Get all tags.
 
@@ -449,16 +741,15 @@ def get_tags(include_items: bool = False) -> str:
     ----
         include_items: Include items tagged with each tag
     """
-    tags = things.tags()
-
-    if not tags:
-        return "No tags found"
-
-    formatted_tags = [format_tag(tag, include_items) for tag in tags]
-    return "\n\n---\n\n".join(formatted_tags)
+    return asyncio.run(_build_tags_response(include_items, None))
 
 
-@mcp.tool(name="get_tagged_items")
+@register_tool(name="get_tagged_items")
+async def _get_tagged_items_tool(tag: str, ctx: Context | None = None) -> str:
+    """Get items with a specific tag via MCP (cached per session)."""
+    return await _build_tagged_items_response(tag, ctx)
+
+
 def get_tagged_items(tag: str) -> str:
     """Get items with a specific tag.
 
@@ -466,19 +757,51 @@ def get_tagged_items(tag: str) -> str:
     ----
         tag: Tag title to filter by
     """
-    todos = things.todos(tag=tag, include_items=True)
-
-    if not todos:
-        return f"No items found with tag '{tag}'"
-
-    formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    return asyncio.run(_build_tagged_items_response(tag, None))
 
 
 # SEARCH OPERATIONS
 
 
-@mcp.tool(name="search_todos")
+async def _build_search_todos_response(query: str, ctx: Context | None) -> str:
+    # Phase 2: Cache formatted response to avoid O(n) formatter DB calls
+    response_cache_key = f"search_todos_response_{query}"
+
+    if ctx is not None:
+        cached_response = await ctx.get_state(response_cache_key)
+        if cached_response is not None:
+            logger.debug("[CACHE] RESPONSE CACHE HIT for search_todos:%s", query)
+            return cached_response
+        logger.debug("[CACHE] RESPONSE CACHE MISS for search_todos:%s", query)
+
+    params = {"query": query}
+    cache_key = _build_cache_key("search_todos", params)
+    todos = await _fetch_search_cache(
+        ctx,
+        cache_key,
+        lambda: things.search(query, include_items=True),
+        label=f"search_todos:{query}",
+    )
+
+    if not todos:
+        return f"No todos found matching '{query}'"
+
+    formatted_todos = [format_todo(todo) for todo in todos]
+    response = "\n\n---\n\n".join(formatted_todos)
+
+    if ctx is not None:
+        await ctx.set_state(response_cache_key, response)
+        logger.debug("[CACHE] RESPONSE CACHE STORED for search_todos:%s", query)
+
+    return response
+
+
+@register_tool(name="search_todos")
+async def _search_todos_tool(query: str, ctx: Context | None = None) -> str:
+    """Search todos by title or notes (cached per session)."""
+    return await _build_search_todos_response(query, ctx)
+
+
 def search_todos(query: str) -> str:
     """Search todos by title or notes.
 
@@ -486,16 +809,90 @@ def search_todos(query: str) -> str:
     ----
         query: Search term to look for in todo titles and notes
     """
-    todos = things.search(query, include_items=True)
-
-    if not todos:
-        return f"No todos found matching '{query}'"
-
-    formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    return asyncio.run(_build_search_todos_response(query, None))
 
 
-@mcp.tool(name="search_advanced")
+async def _build_search_advanced_response(
+    status: str | None = None,
+    start_date: str | None = None,
+    deadline: str | None = None,
+    tag: str | None = None,
+    area: str | None = None,
+    type: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    kwargs: dict[str, Any] = {"include_items": True}
+    if status:
+        kwargs["status"] = status
+    if start_date:
+        kwargs["start"] = start_date
+    if deadline:
+        kwargs["deadline"] = deadline
+    if tag:
+        kwargs["tag"] = tag
+    if area:
+        kwargs["area"] = area
+    if type:
+        kwargs["type"] = type
+
+    filters = {k: v for k, v in kwargs.items() if k != "include_items" and v is not None}
+    cache_key = _build_cache_key("search_advanced", filters)
+
+    # Phase 2: Cache formatted response
+    response_cache_key = f"search_advanced_response_{cache_key}"
+
+    if ctx is not None:
+        cached_response = await ctx.get_state(response_cache_key)
+        if cached_response is not None:
+            logger.debug("[CACHE] RESPONSE CACHE HIT for %s", response_cache_key)
+            return cached_response
+        logger.debug("[CACHE] RESPONSE CACHE MISS for %s", response_cache_key)
+
+    try:
+        todos = await _fetch_search_cache(
+            ctx,
+            cache_key,
+            lambda: things.todos(**kwargs),
+            label=f"search_advanced:{cache_key}",
+        )
+
+        if not todos:
+            return "No items found matching your search criteria"
+
+        formatted_todos = [format_todo(todo) for todo in todos]
+        response = "\n\n---\n\n".join(formatted_todos)
+
+        if ctx is not None:
+            await ctx.set_state(response_cache_key, response)
+            logger.debug("[CACHE] RESPONSE CACHE STORED for %s", response_cache_key)
+
+        return response
+    except Exception as e:
+        return f"Error in advanced search: {e!s}"
+
+
+@register_tool(name="search_advanced")
+async def _search_advanced_tool(
+    status: str | None = None,
+    start_date: str | None = None,
+    deadline: str | None = None,
+    tag: str | None = None,
+    area: str | None = None,
+    type: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Advanced todo search with multiple filters (cached per session)."""
+    return await _build_search_advanced_response(
+        status=status,
+        start_date=start_date,
+        deadline=deadline,
+        tag=tag,
+        area=area,
+        type=type,
+        ctx=ctx,
+    )
+
+
 def search_advanced(
     status: str | None = None,
     start_date: str | None = None,
@@ -515,42 +912,27 @@ def search_advanced(
         area: Filter by area UUID
         type: Filter by item type (to-do/project/heading)
     """
-    # Build filter parameters
-    kwargs = {"include_items": True}
-
-    # Add filters that are provided
-    if status:
-        kwargs["status"] = status
-    if deadline:
-        kwargs["deadline"] = deadline
-    if start_date:
-        kwargs["start"] = start_date
-    if tag:
-        kwargs["tag"] = tag
-    if area:
-        kwargs["area"] = area
-    if type:
-        kwargs["type"] = type
-
-    # Execute search with applicable filters
-    try:
-        todos = things.todos(**kwargs)
-
-        if not todos:
-            return "No items found matching your search criteria"
-
-        formatted_todos = [format_todo(todo) for todo in todos]
-        return "\n\n---\n\n".join(formatted_todos)
-    except Exception as e:
-        return f"Error in advanced search: {e!s}"
+    return asyncio.run(
+        _build_search_advanced_response(
+            status=status,
+            start_date=start_date,
+            deadline=deadline,
+            tag=tag,
+            area=area,
+            type=type,
+            ctx=None,
+        )
+    )
 
 
 # MODIFICATION OPERATIONS
 
 
-@mcp.tool(name="add_todo")
-def add_task(
+@register_tool(name="add_todo")
+async def add_task(
     title: str,
+    *,
+    ctx: Context | None = None,
     notes: str | None = None,
     when: str | None = None,
     deadline: str | None = None,
@@ -563,6 +945,7 @@ def add_task(
     Args:
     ----
         title: Title of the todo
+        ctx: FastMCP context for session state (auto-injected by MCP, optional for direct calls)
         notes: Notes for the todo
         when: When to schedule the todo (today, tomorrow, evening, anytime, someday, or YYYY-MM-DD)
         deadline: Deadline for the todo (YYYY-MM-DD)
@@ -615,15 +998,30 @@ def add_task(
             return f"⚠️ AppleScript error: {task_id}"
 
         # Get location information for the success message
+        # Use cached data when ctx is available (MCP invocation), fallback to direct lookup otherwise
         try:
-            import things
-
             todo = things.get(task_id)
             if todo:
                 if todo.get("project"):
-                    location = f"Project: {things.get(todo['project'])['title']}"
+                    if ctx is not None:
+                        # Use cached projects for efficient lookup
+                        projects = await get_cached_projects(ctx)
+                        project = next((p for p in projects if p["uuid"] == todo["project"]), None)
+                        location = f"Project: {project['title']}" if project else f"Project: {todo['project']}"
+                    else:
+                        # Direct lookup when no context
+                        project_item = things.get(todo["project"])
+                        location = f"Project: {project_item['title']}" if project_item else f"Project: {todo['project']}"
                 elif todo.get("area"):
-                    location = f"Area: {things.get(todo['area'])['title']}"
+                    if ctx is not None:
+                        # Use cached areas for efficient lookup
+                        areas = await get_cached_areas(ctx)
+                        area = next((a for a in areas if a["uuid"] == todo["area"]), None)
+                        location = f"Area: {area['title']}" if area else f"Area: {todo['area']}"
+                    else:
+                        # Direct lookup when no context
+                        area_item = things.get(todo["area"])
+                        location = f"Area: {area_item['title']}" if area_item else f"Area: {todo['area']}"
                 else:
                     location = f"List: {todo.get('start', 'Unknown')}"
             else:
@@ -641,8 +1039,8 @@ def add_task(
         return f"⚠️ Error creating todo: {e!s}"
 
 
-@mcp.tool(name="add_project")
-def add_new_project(
+@register_tool(name="add_project")
+async def add_new_project(
     title: str,
     notes: str | None = None,
     when: str | None = None,
@@ -651,6 +1049,8 @@ def add_new_project(
     area_id: str | None = None,
     area_title: str | None = None,
     todos: list[str] | str | None = None,
+    *,
+    ctx: Context | None = None,
 ) -> str:
     """Create a new project in Things.
 
@@ -666,6 +1066,7 @@ def add_new_project(
         area_id: ID of area to add to
         area_title: Title of area to add to (must exactly match an existing area title — look them up with get_areas)
         todos: Initial todos to create in the project
+        ctx: FastMCP context for session state (auto-injected by MCP, optional for direct calls)
     """
     try:
         # Preprocess parameters to handle MCP array serialization issues
@@ -693,14 +1094,25 @@ def add_new_project(
         if not project_id:
             return "Error: Failed to create project using AppleScript"
 
-        # Look up the project to get location information
-        try:
-            import things
+        # Invalidate projects cache since we created a new project (when ctx available)
+        if ctx is not None:
+            await invalidate_projects_cache(ctx)
 
+        # Look up the project to get location information
+        # Use cached data when ctx is available (MCP invocation), fallback to direct lookup otherwise
+        try:
             project = things.get(project_id)
             if project:
                 if project.get("area"):
-                    location = f"Area: {things.get(project['area'])['title']}"
+                    if ctx is not None:
+                        # Use cached areas for efficient lookup
+                        areas = await get_cached_areas(ctx)
+                        area = next((a for a in areas if a["uuid"] == project["area"]), None)
+                        location = f"Area: {area['title']}" if area else f"Area: {project['area']}"
+                    else:
+                        # Direct lookup when no context
+                        area_item = things.get(project["area"])
+                        location = f"Area: {area_item['title']}" if area_item else f"Area: {project['area']}"
                 else:
                     location = "List: Inbox"
             else:
@@ -718,8 +1130,8 @@ def add_new_project(
         return f"⚠️ Error creating project: {e!s}"
 
 
-@mcp.tool(name="update_todo")
-def update_task(
+@register_tool(name="update_todo")
+async def update_task(
     id: str,
     title: str | None = None,
     notes: str | None = None,
@@ -730,6 +1142,8 @@ def update_task(
     canceled: bool | None = None,
     list_id: str | None = None,
     list_name: str | None = None,
+    *,
+    ctx: Context | None = None,
 ) -> str:
     """Update an existing todo in Things.
 
@@ -746,7 +1160,9 @@ def update_task(
         list_id: ID of project/area to move the todo to (takes priority over list_name if both provided).
         list_name: Name of built-in list, project, or area to move the todo to. For built-in lists use: "Inbox", "Today", "Anytime", "Someday". For projects or areas, use the exact name.
             If both list_id and list_name are provided, list_id takes priority.
+        ctx: FastMCP context for session state (auto-injected by MCP, optional for direct calls)
     """
+    # Note: ctx is available for future caching of list_name lookups when provided
     try:
         # Preprocess parameters to handle MCP array serialization issues
         params = preprocess_array_params(tags=tags)
@@ -801,8 +1217,8 @@ def update_task(
         return f"⚠️ Error updating todo: {e!s}"
 
 
-@mcp.tool(name="update_project")
-def update_existing_project(
+@register_tool(name="update_project")
+async def update_existing_project(
     id: str,
     title: str | None = None,
     notes: str | None = None,
@@ -814,6 +1230,8 @@ def update_existing_project(
     list_name: str | None = None,
     area_title: str | None = None,
     area_id: str | None = None,
+    *,
+    ctx: Context | None = None,
 ) -> str:
     """Update an existing project in Things.
 
@@ -836,7 +1254,9 @@ def update_existing_project(
                   to Logbook, mark it as completed instead.
         area_title: Title of the area to move the project to
         area_id: ID of the area to move the project to
+        ctx: FastMCP context for session state (auto-injected by MCP, optional for direct calls)
     """
+    # Note: ctx is available for future caching of area_title lookups when provided
     try:
         # Log all input parameters for debugging
         logger.info("Raw input parameters for update_project:")
@@ -900,7 +1320,7 @@ def update_existing_project(
         return f"⚠️ Error updating project: {e!s}"
 
 
-@mcp.tool(name="show_item")
+@register_tool(name="show_item")
 def show_item(id: str, query: str | None = None, filter_tags: list[str] | None = None) -> str:
     """Show a specific item or list in Things.
 
@@ -950,7 +1370,7 @@ def show_item(id: str, query: str | None = None, filter_tags: list[str] | None =
         return f"Error showing item: {e!s}"
 
 
-@mcp.tool(name="search_items")
+@register_tool(name="search_items")
 def search_all_items(query: str) -> str:
     """Search for items in Things.
 
@@ -972,7 +1392,18 @@ def search_all_items(query: str) -> str:
         return f"Error searching: {e!s}"
 
 
-@mcp.tool(name="get_recent")
+@register_tool(name="get_recent")
+async def _get_recent_tool(period: str, ctx: Context | None = None) -> str:
+    """Get recently created items via MCP (cached per session)."""
+    try:
+        return await _build_recent_response(period, ctx)
+    except ValueError as err:
+        return f"Error: {err}"
+    except Exception as err:
+        logger.error(f"Error getting recent items: {err!s}")
+        return f"Error getting recent items: {err!s}"
+
+
 def get_recent(period: str) -> str:
     """Get recently created items.
 
@@ -981,27 +1412,12 @@ def get_recent(period: str) -> str:
         period: Time period (e.g., '3d', '1w', '2m', '1y')
     """
     try:
-        # Check if period format is valid
-        if not period or not any(period.endswith(unit) for unit in ["d", "w", "m", "y"]):
-            return "Error: Period must be in format '3d', '1w', '2m', '1y'"
-
-        # Get recent items
-        items = things.last(period, include_items=True)
-
-        if not items:
-            return f"No items found in the last {period}"
-
-        formatted_items = []
-        for item in items:
-            if item.get("type") == "to-do":
-                formatted_items.append(format_todo(item))
-            elif item.get("type") == "project":
-                formatted_items.append(format_project(item, include_items=False))
-
-        return "\n\n---\n\n".join(formatted_items)
-    except Exception as e:
-        logger.error(f"Error getting recent items: {e!s}")
-        return f"Error getting recent items: {e!s}"
+        return asyncio.run(_build_recent_response(period, None))
+    except ValueError as err:
+        return f"Error: {err}"
+    except Exception as err:
+        logger.error(f"Error getting recent items: {err!s}")
+        return f"Error getting recent items: {err!s}"
 
 
 # Main entry point

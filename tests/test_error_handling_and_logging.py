@@ -4,6 +4,7 @@ This module tests the enhanced error handling, logging, and edge cases
 introduced to improve the reliability of the Things MCP server.
 """
 
+import asyncio
 import io
 import logging
 import os
@@ -57,7 +58,8 @@ def test_mcp_server_error_propagation():
     title = f"Error Propagation Test {generate_random_string(5)}"
 
     # Test with a scenario that should cause an error - use a malformed list_id
-    result = add_task(title=title, list_id="definitely-invalid-uuid-format")
+    # Note: add_task is async, so we need asyncio.run()
+    result = asyncio.run(add_task(title=title, list_id="definitely-invalid-uuid-format"))
 
     # Should return properly formatted message (either success or graceful error)
     assert isinstance(result, str), "Should return string result"
@@ -92,7 +94,8 @@ def test_error_message_format_consistency():
     ]
 
     for i, scenario in enumerate(test_scenarios):
-        result = add_task(title=f"{title}_{i}", **scenario)
+        # Note: add_task is async, so we need asyncio.run()
+        result = asyncio.run(add_task(title=f"{title}_{i}", **scenario))
 
         # Check message format
         assert isinstance(result, str), f"Should return string for scenario: {scenario}"
@@ -168,7 +171,8 @@ def test_error_logging_includes_context():
         title = f"Context Test {generate_random_string(5)}"
 
         # Test with parameters that will be logged
-        result = add_task(title=title, list_id="test-id-for-logging")
+        # Note: add_task is async, so we need asyncio.run()
+        result = asyncio.run(add_task(title=title, list_id="test-id-for-logging"))
 
         # Should return some result
         assert isinstance(result, str), "Should return string result"
@@ -207,7 +211,8 @@ def test_success_logging_includes_location():
         title = f"Success Logging Test {generate_random_string(5)}"
 
         # Create a real todo to test location logging
-        result = add_task(title=title)
+        # Note: add_task is async, so we need asyncio.run()
+        result = asyncio.run(add_task(title=title))
 
         # Should be a success message
         assert "✅" in result, "Should be successful"
@@ -247,12 +252,15 @@ def test_edge_case_parameter_logging():
         # Test with edge case parameters
         title = f"Edge Case Test {generate_random_string(5)}"
 
-        result = add_task(
-            title=title,
-            list_id="",  # Empty ID
-            list_title=None,  # None title
-            tags=[],  # Empty tags
-            notes="",  # Empty notes
+        # Note: add_task is async, so we need asyncio.run()
+        result = asyncio.run(
+            add_task(
+                title=title,
+                list_id="",  # Empty ID
+                list_title=None,  # None title
+                tags=[],  # Empty tags
+                notes="",  # Empty notes
+            )
         )
 
         # Should still work (create in Inbox)

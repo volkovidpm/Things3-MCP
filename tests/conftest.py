@@ -47,7 +47,7 @@ def create_test_tag(tag_name: str) -> bool:
         return id of newTag
     end tell
     """
-    result = run_applescript(script)
+    result = run_applescript(script, timeout=20)
     return result and "error" not in result.lower()
 
 
@@ -78,7 +78,7 @@ def delete_test_tags():
         end try
     end tell
     """
-    result = run_applescript(script)
+    result = run_applescript(script, timeout=30)
     if result and "error" not in result.lower():
         print("✅ Successfully cleaned up test tags")
     else:
