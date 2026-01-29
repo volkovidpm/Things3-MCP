@@ -58,17 +58,186 @@ def preprocess_array_params(**kwargs):
     return result
 
 
-# Session state cache helpers for v3
+# =============================================================================
+# CACHE KEY MANAGEMENT
+# =============================================================================
+# Centralized cache key definitions to prevent key mismatches in invalidation.
+# All cache keys should be defined here and used via these constants/functions.
+
+
+class CacheKeys:
+    """Centralized cache key definitions to prevent key mismatches."""
+
+    # Raw data caches (for internal lookups)
+    AREAS_LOOKUP = "areas_cache"  # Simple list for area_title resolution
+    PROJECTS_LOOKUP = "projects_cache"  # Simple list for list_title resolution
+
+    # Cache tracking key (for size limits)
+    CACHE_KEYS_LIST = "_cache_keys_list"
+
+    # Raw data caches with include_items variants
+    @staticmethod
+    def projects_raw(include_items: bool) -> str:
+        """Cache key for raw projects data."""
+        return f"projects_raw_{include_items}"
+
+    @staticmethod
+    def areas_raw(include_items: bool) -> str:
+        """Cache key for raw areas data."""
+        return f"areas_raw_{include_items}"
+
+    # Formatted response caches
+    @staticmethod
+    def projects_response(include_items: bool) -> str:
+        """Cache key for formatted projects response."""
+        return f"projects_response_{include_items}"
+
+    @staticmethod
+    def areas_response(include_items: bool) -> str:
+        """Cache key for formatted areas response."""
+        return f"areas_response_{include_items}"
+
+    @staticmethod
+    def tags_response(include_items: bool) -> str:
+        """Cache key for formatted tags response."""
+        return f"tags_response_{include_items}"
+
+    @staticmethod
+    def tagged_items_response(tag: str) -> str:
+        """Cache key for formatted tagged items response."""
+        return f"tagged_items_response_{tag}"
+
+    @staticmethod
+    def recent_response(period: str) -> str:
+        """Cache key for formatted recent items response."""
+        return f"recent_response_{period}"
+
+    @staticmethod
+    def search_todos_response(query: str) -> str:
+        """Cache key for formatted search todos response."""
+        return f"search_todos_response_{query}"
+
+    @staticmethod
+    def search_advanced_response(cache_key: str) -> str:
+        """Cache key for formatted advanced search response."""
+        return f"search_advanced_response_{cache_key}"
+
+    # Individual search cache keys (avoid shared dict race condition)
+    @staticmethod
+    def search_raw(key: str) -> str:
+        """Cache key for raw search data (individual keys to avoid race conditions)."""
+        return f"search_raw_{key}"
+
+
+# Maximum number of cached responses to keep (simple FIFO eviction)
+# Each unique search query, tag, period, etc. counts as one entry.
+# Cached data is mostly formatted strings, so memory per entry is modest.
+MAX_RESPONSE_CACHE_SIZE = 500
+
+
+async def _track_cache_key(ctx: Context, key: str) -> None:
+    """Track cache keys for potential eviction."""
+    keys_list = await ctx.get_state(CacheKeys.CACHE_KEYS_LIST)
+    if keys_list is None:
+        keys_list = []
+
+    # Add key if not already tracked
+    if key not in keys_list:
+        keys_list.append(key)
+
+    # Evict oldest keys if over limit
+    while len(keys_list) > MAX_RESPONSE_CACHE_SIZE:
+        old_key = keys_list.pop(0)
+        await ctx.set_state(old_key, None)
+        logger.debug("[CACHE] Evicted old cache key: %s", old_key)
+
+    await ctx.set_state(CacheKeys.CACHE_KEYS_LIST, keys_list)
+
+
+# =============================================================================
+# CACHE INVALIDATION
+# =============================================================================
+
+
+async def invalidate_all_caches(ctx: Context) -> None:
+    """Invalidate all caches. Use sparingly - prefer targeted invalidation."""
+    keys_list = await ctx.get_state(CacheKeys.CACHE_KEYS_LIST)
+    if keys_list:
+        for key in keys_list:
+            await ctx.set_state(key, None)
+        await ctx.set_state(CacheKeys.CACHE_KEYS_LIST, [])
+
+    # Also clear the lookup caches
+    await ctx.set_state(CacheKeys.AREAS_LOOKUP, None)
+    await ctx.set_state(CacheKeys.PROJECTS_LOOKUP, None)
+    logger.debug("[CACHE] Invalidated all caches")
+
+
+async def invalidate_projects_cache(ctx: Context) -> None:
+    """Invalidate all project-related caches."""
+    # Clear lookup cache
+    await ctx.set_state(CacheKeys.PROJECTS_LOOKUP, None)
+    # Clear raw data caches (both include_items variants)
+    await ctx.set_state(CacheKeys.projects_raw(True), None)
+    await ctx.set_state(CacheKeys.projects_raw(False), None)
+    # Clear response caches
+    await ctx.set_state(CacheKeys.projects_response(True), None)
+    await ctx.set_state(CacheKeys.projects_response(False), None)
+    logger.debug("[CACHE] Invalidated projects caches")
+
+
+async def invalidate_areas_cache(ctx: Context) -> None:
+    """Invalidate all area-related caches."""
+    await ctx.set_state(CacheKeys.AREAS_LOOKUP, None)
+    await ctx.set_state(CacheKeys.areas_raw(True), None)
+    await ctx.set_state(CacheKeys.areas_raw(False), None)
+    await ctx.set_state(CacheKeys.areas_response(True), None)
+    await ctx.set_state(CacheKeys.areas_response(False), None)
+    logger.debug("[CACHE] Invalidated areas caches")
+
+
+async def invalidate_todos_cache(ctx: Context) -> None:
+    """Invalidate caches that may contain todo data.
+
+    This is broader because todos appear in search, recent, tagged items, etc.
+    We invalidate the search_cache and response caches that might be stale.
+    """
+    # Clear all search-related raw caches by clearing tracked keys
+    # This is a simple approach - a more sophisticated one would track
+    # which specific search keys need invalidation
+    keys_list = await ctx.get_state(CacheKeys.CACHE_KEYS_LIST)
+    if keys_list:
+        for key in list(keys_list):
+            # Invalidate search, recent, and tagged items caches
+            if any(prefix in key for prefix in ["search_", "recent_", "tagged_items_"]):
+                await ctx.set_state(key, None)
+                keys_list.remove(key)
+                logger.debug("[CACHE] Invalidated todo-related cache: %s", key)
+        await ctx.set_state(CacheKeys.CACHE_KEYS_LIST, keys_list)
+
+
+async def invalidate_tags_cache(ctx: Context) -> None:
+    """Invalidate tag-related caches."""
+    await ctx.set_state(CacheKeys.tags_response(True), None)
+    await ctx.set_state(CacheKeys.tags_response(False), None)
+    logger.debug("[CACHE] Invalidated tags caches")
+
+
+# =============================================================================
+# SESSION STATE CACHE HELPERS
+# =============================================================================
+
+
 async def get_cached_areas(ctx: Context) -> list:
     """Get areas list, cached for the session.
 
     Avoids redundant Things database lookups when resolving area_title parameters.
     Cache is automatically scoped to the MCP session.
     """
-    areas = await ctx.get_state("areas_cache")
+    areas = await ctx.get_state(CacheKeys.AREAS_LOOKUP)
     if areas is None:
         areas = things.areas()
-        await ctx.set_state("areas_cache", areas)
+        await ctx.set_state(CacheKeys.AREAS_LOOKUP, areas)
         logger.debug(f"Cached {len(areas)} areas for session")
     return areas
 
@@ -79,75 +248,49 @@ async def get_cached_projects(ctx: Context) -> list:
     Avoids redundant Things database lookups when resolving list_title parameters.
     Cache is automatically scoped to the MCP session.
     """
-    projects = await ctx.get_state("projects_cache")
+    projects = await ctx.get_state(CacheKeys.PROJECTS_LOOKUP)
     if projects is None:
         projects = things.projects()
-        await ctx.set_state("projects_cache", projects)
+        await ctx.set_state(CacheKeys.PROJECTS_LOOKUP, projects)
         logger.debug(f"Cached {len(projects)} projects for session")
     return projects
 
 
-async def invalidate_projects_cache(ctx: Context) -> None:
-    """Invalidate the projects cache after creating a new project."""
-    await ctx.set_state("projects_cache", None)
-    logger.debug("Invalidated projects cache")
-
-
 async def _fetch_projects_with_cache(ctx: Context | None, include_items: bool) -> list:
-    cache_key = f"projects_cache_include_items_{include_items}"
-
-    # Phase 1 diagnostic logging: understand why caching isn't working
+    cache_key = CacheKeys.projects_raw(include_items)
     logger.debug("[CACHE] _fetch_projects_with_cache called: ctx=%s, key=%s", ctx is not None, cache_key)
 
     if ctx is not None:
-        # Log session info if available
-        try:
-            # FastMCP 3.0 Context may have request_id or session info
-            ctx_info = f"ctx_type={type(ctx).__name__}"
-            if hasattr(ctx, "request_id"):
-                ctx_info += f", request_id={ctx.request_id}"
-            if hasattr(ctx, "session"):
-                ctx_info += f", session={ctx.session}"
-            logger.debug("[CACHE] Context info: %s", ctx_info)
-        except Exception as e:
-            logger.debug("[CACHE] Could not inspect context: %s", e)
-
         cached = await ctx.get_state(cache_key)
         if cached is not None:
-            logger.debug("[CACHE] CACHE HIT for %s (%d items)", cache_key, len(cached))
+            logger.debug("[CACHE] HIT for %s (%d items)", cache_key, len(cached))
             return cached
-        else:
-            logger.debug("[CACHE] CACHE MISS for %s (state returned None)", cache_key)
-    else:
-        logger.debug("[CACHE] Context is None - cannot use session cache")
+        logger.debug("[CACHE] MISS for %s", cache_key)
 
     projects = things.projects(include_items=include_items)
     if ctx is not None:
         await ctx.set_state(cache_key, projects)
-        logger.debug("[CACHE] Cache STORED for %s (%d items)", cache_key, len(projects))
+        await _track_cache_key(ctx, cache_key)
+        logger.debug("[CACHE] STORED %s (%d items)", cache_key, len(projects))
     return projects
 
 
 async def _fetch_areas_with_cache(ctx: Context | None, include_items: bool) -> list:
-    cache_key = f"areas_cache_include_items_{include_items}"
-
-    # Phase 1 diagnostic logging
+    cache_key = CacheKeys.areas_raw(include_items)
     logger.debug("[CACHE] _fetch_areas_with_cache called: ctx=%s, key=%s", ctx is not None, cache_key)
 
     if ctx is not None:
         cached = await ctx.get_state(cache_key)
         if cached is not None:
-            logger.debug("[CACHE] CACHE HIT for %s (%d items)", cache_key, len(cached))
+            logger.debug("[CACHE] HIT for %s (%d items)", cache_key, len(cached))
             return cached
-        else:
-            logger.debug("[CACHE] CACHE MISS for %s", cache_key)
-    else:
-        logger.debug("[CACHE] Context is None for areas cache")
+        logger.debug("[CACHE] MISS for %s", cache_key)
 
     areas = things.areas(include_items=include_items)
     if ctx is not None:
         await ctx.set_state(cache_key, areas)
-        logger.debug("[CACHE] Cache STORED for %s (%d items)", cache_key, len(areas))
+        await _track_cache_key(ctx, cache_key)
+        logger.debug("[CACHE] STORED %s (%d items)", cache_key, len(areas))
     return areas
 
 
@@ -164,52 +307,76 @@ async def _fetch_search_cache(
     loader: Callable[[], Any],
     label: str | None = None,
 ) -> Any:
-    display_label = label or cache_key
+    """Fetch data with caching, using individual keys to avoid race conditions.
 
-    # Phase 1 diagnostic logging
-    logger.debug("[CACHE] _fetch_search_cache called: ctx=%s, key=%s", ctx is not None, display_label)
+    Previously used a shared dict which had read-modify-write race conditions.
+    Now uses individual state keys for each cache entry.
+    """
+    display_label = label or cache_key
 
     if ctx is None:
         logger.debug("[CACHE] Context is None - bypassing cache for %s", display_label)
         return loader()
 
-    state = await ctx.get_state("search_cache")
-    cache = dict(state) if isinstance(state, dict) else {}
-    logger.debug("[CACHE] search_cache state: %d keys in cache", len(cache))
+    # Use individual key instead of shared dict (fixes race condition)
+    state_key = CacheKeys.search_raw(cache_key)
+    cached = await ctx.get_state(state_key)
 
-    if cache_key in cache:
-        logger.debug("[CACHE] CACHE HIT for %s", display_label)
-        return cache[cache_key]
+    if cached is not None:
+        logger.debug("[CACHE] HIT for %s", display_label)
+        return cached
 
-    logger.debug("[CACHE] CACHE MISS for %s", display_label)
+    logger.debug("[CACHE] MISS for %s", display_label)
     result = loader()
-    cache[cache_key] = result
-    await ctx.set_state("search_cache", cache)
-    logger.debug("[CACHE] Cache STORED for %s (now %d keys)", display_label, len(cache))
+    await ctx.set_state(state_key, result)
+    await _track_cache_key(ctx, state_key)
+    logger.debug("[CACHE] STORED %s", display_label)
     return result
 
 
 async def _build_tags_response(include_items: bool, ctx: Context | None) -> str:
-    cache_key = f"get_tags:{include_items}"
-    tags = await _fetch_search_cache(ctx, cache_key, lambda: things.tags(), label="get_tags")
+    """Build tags response with response-level caching.
+
+    Caches the formatted response to avoid O(n) formatter DB calls when
+    include_items=True (format_tag calls things.todos() per tag).
+    """
+    # Response cache key
+    response_key = CacheKeys.tags_response(include_items)
+
+    if ctx is not None:
+        cached_response = await ctx.get_state(response_key)
+        if cached_response is not None:
+            logger.debug("[CACHE] RESPONSE HIT for %s", response_key)
+            return cached_response
+        logger.debug("[CACHE] RESPONSE MISS for %s", response_key)
+
+    # Note: things.tags() ignores include_items, so we use a single raw cache key
+    tags = await _fetch_search_cache(ctx, "tags_raw", lambda: things.tags(), label="get_tags")
 
     if not tags:
         return "No tags found"
 
     formatted_tags = [format_tag(tag, include_items) for tag in tags]
-    return "\n\n---\n\n".join(formatted_tags)
+    response = "\n\n---\n\n".join(formatted_tags)
+
+    if ctx is not None:
+        await ctx.set_state(response_key, response)
+        await _track_cache_key(ctx, response_key)
+        logger.debug("[CACHE] RESPONSE STORED for %s", response_key)
+
+    return response
 
 
 async def _build_tagged_items_response(tag: str, ctx: Context | None) -> str:
-    # Phase 2: Cache formatted response
-    response_cache_key = f"tagged_items_response_{tag}"
+    """Build tagged items response with response-level caching."""
+    response_key = CacheKeys.tagged_items_response(tag)
 
     if ctx is not None:
-        cached_response = await ctx.get_state(response_cache_key)
+        cached_response = await ctx.get_state(response_key)
         if cached_response is not None:
-            logger.debug("[CACHE] RESPONSE CACHE HIT for tagged_items:%s", tag)
+            logger.debug("[CACHE] RESPONSE HIT for %s", response_key)
             return cached_response
-        logger.debug("[CACHE] RESPONSE CACHE MISS for tagged_items:%s", tag)
+        logger.debug("[CACHE] RESPONSE MISS for %s", response_key)
 
     cache_key = _build_cache_key("tagged_items", {"tag": tag})
     todos = await _fetch_search_cache(
@@ -226,8 +393,9 @@ async def _build_tagged_items_response(tag: str, ctx: Context | None) -> str:
     response = "\n\n---\n\n".join(formatted_todos)
 
     if ctx is not None:
-        await ctx.set_state(response_cache_key, response)
-        logger.debug("[CACHE] RESPONSE CACHE STORED for tagged_items:%s", tag)
+        await ctx.set_state(response_key, response)
+        await _track_cache_key(ctx, response_key)
+        logger.debug("[CACHE] RESPONSE STORED for %s", response_key)
 
     return response
 
@@ -237,18 +405,18 @@ def _validate_period(period: str) -> bool:
 
 
 async def _build_recent_response(period: str, ctx: Context | None) -> str:
+    """Build recent items response with response-level caching."""
     if not _validate_period(period):
         raise ValueError("Period must be in format '3d', '1w', '2m', '1y'")
 
-    # Phase 2: Cache the formatted response to avoid O(n) formatter DB calls
-    response_cache_key = f"recent_response_{period}"
+    response_key = CacheKeys.recent_response(period)
 
     if ctx is not None:
-        cached_response = await ctx.get_state(response_cache_key)
+        cached_response = await ctx.get_state(response_key)
         if cached_response is not None:
-            logger.debug("[CACHE] RESPONSE CACHE HIT for %s", response_cache_key)
+            logger.debug("[CACHE] RESPONSE HIT for %s", response_key)
             return cached_response
-        logger.debug("[CACHE] RESPONSE CACHE MISS for %s", response_cache_key)
+        logger.debug("[CACHE] RESPONSE MISS for %s", response_key)
 
     cache_key = _build_cache_key("get_recent", {"period": period})
     items = await _fetch_search_cache(
@@ -271,8 +439,9 @@ async def _build_recent_response(period: str, ctx: Context | None) -> str:
     response = "\n\n---\n\n".join(formatted_items)
 
     if ctx is not None:
-        await ctx.set_state(response_cache_key, response)
-        logger.debug("[CACHE] RESPONSE CACHE STORED for %s", response_cache_key)
+        await ctx.set_state(response_key, response)
+        await _track_cache_key(ctx, response_key)
+        logger.debug("[CACHE] RESPONSE STORED for %s", response_key)
 
     return response
 
@@ -638,31 +807,28 @@ def get_random_todos(project_uuid: str | None = None, count: int = 5) -> str:
 
 
 async def _build_projects_response(include_items: bool, ctx: Context | None) -> str:
-    # Phase 2: Cache the FINAL formatted response, not just raw data
-    # This eliminates O(n) formatter database calls on cache hits
-    response_cache_key = f"projects_response_{include_items}"
+    """Build projects response with response-level caching."""
+    response_key = CacheKeys.projects_response(include_items)
 
     if ctx is not None:
-        cached_response = await ctx.get_state(response_cache_key)
+        cached_response = await ctx.get_state(response_key)
         if cached_response is not None:
-            logger.debug("[CACHE] RESPONSE CACHE HIT for %s", response_cache_key)
+            logger.debug("[CACHE] RESPONSE HIT for %s", response_key)
             return cached_response
-        logger.debug("[CACHE] RESPONSE CACHE MISS for %s", response_cache_key)
+        logger.debug("[CACHE] RESPONSE MISS for %s", response_key)
 
-    # Fetch raw data (still cached separately for other uses)
     projects = await _fetch_projects_with_cache(ctx, include_items)
 
     if not projects:
         return "No projects found"
 
-    # Build formatted response (expensive due to formatter DB calls)
     formatted_projects = [format_project(project, include_items) for project in projects]
     response = "\n\n---\n\n".join(formatted_projects)
 
-    # Cache the formatted response
     if ctx is not None:
-        await ctx.set_state(response_cache_key, response)
-        logger.debug("[CACHE] RESPONSE CACHE STORED for %s", response_cache_key)
+        await ctx.set_state(response_key, response)
+        await _track_cache_key(ctx, response_key)
+        logger.debug("[CACHE] RESPONSE STORED for %s", response_key)
 
     return response
 
@@ -684,15 +850,15 @@ def get_projects(include_items: bool = False) -> str:
 
 
 async def _build_areas_response(include_items: bool, ctx: Context | None) -> str:
-    # Phase 2: Cache the FINAL formatted response
-    response_cache_key = f"areas_response_{include_items}"
+    """Build areas response with response-level caching."""
+    response_key = CacheKeys.areas_response(include_items)
 
     if ctx is not None:
-        cached_response = await ctx.get_state(response_cache_key)
+        cached_response = await ctx.get_state(response_key)
         if cached_response is not None:
-            logger.debug("[CACHE] RESPONSE CACHE HIT for %s", response_cache_key)
+            logger.debug("[CACHE] RESPONSE HIT for %s", response_key)
             return cached_response
-        logger.debug("[CACHE] RESPONSE CACHE MISS for %s", response_cache_key)
+        logger.debug("[CACHE] RESPONSE MISS for %s", response_key)
 
     areas = await _fetch_areas_with_cache(ctx, include_items)
 
@@ -703,8 +869,9 @@ async def _build_areas_response(include_items: bool, ctx: Context | None) -> str
     response = "\n\n---\n\n".join(formatted_areas)
 
     if ctx is not None:
-        await ctx.set_state(response_cache_key, response)
-        logger.debug("[CACHE] RESPONSE CACHE STORED for %s", response_cache_key)
+        await ctx.set_state(response_key, response)
+        await _track_cache_key(ctx, response_key)
+        logger.debug("[CACHE] RESPONSE STORED for %s", response_key)
 
     return response
 
@@ -764,15 +931,15 @@ def get_tagged_items(tag: str) -> str:
 
 
 async def _build_search_todos_response(query: str, ctx: Context | None) -> str:
-    # Phase 2: Cache formatted response to avoid O(n) formatter DB calls
-    response_cache_key = f"search_todos_response_{query}"
+    """Build search todos response with response-level caching."""
+    response_key = CacheKeys.search_todos_response(query)
 
     if ctx is not None:
-        cached_response = await ctx.get_state(response_cache_key)
+        cached_response = await ctx.get_state(response_key)
         if cached_response is not None:
-            logger.debug("[CACHE] RESPONSE CACHE HIT for search_todos:%s", query)
+            logger.debug("[CACHE] RESPONSE HIT for %s", response_key)
             return cached_response
-        logger.debug("[CACHE] RESPONSE CACHE MISS for search_todos:%s", query)
+        logger.debug("[CACHE] RESPONSE MISS for %s", response_key)
 
     params = {"query": query}
     cache_key = _build_cache_key("search_todos", params)
@@ -790,8 +957,9 @@ async def _build_search_todos_response(query: str, ctx: Context | None) -> str:
     response = "\n\n---\n\n".join(formatted_todos)
 
     if ctx is not None:
-        await ctx.set_state(response_cache_key, response)
-        logger.debug("[CACHE] RESPONSE CACHE STORED for search_todos:%s", query)
+        await ctx.set_state(response_key, response)
+        await _track_cache_key(ctx, response_key)
+        logger.debug("[CACHE] RESPONSE STORED for %s", response_key)
 
     return response
 
@@ -821,6 +989,7 @@ async def _build_search_advanced_response(
     type: str | None = None,
     ctx: Context | None = None,
 ) -> str:
+    """Build advanced search response with response-level caching."""
     kwargs: dict[str, Any] = {"include_items": True}
     if status:
         kwargs["status"] = status
@@ -837,16 +1006,14 @@ async def _build_search_advanced_response(
 
     filters = {k: v for k, v in kwargs.items() if k != "include_items" and v is not None}
     cache_key = _build_cache_key("search_advanced", filters)
-
-    # Phase 2: Cache formatted response
-    response_cache_key = f"search_advanced_response_{cache_key}"
+    response_key = CacheKeys.search_advanced_response(cache_key)
 
     if ctx is not None:
-        cached_response = await ctx.get_state(response_cache_key)
+        cached_response = await ctx.get_state(response_key)
         if cached_response is not None:
-            logger.debug("[CACHE] RESPONSE CACHE HIT for %s", response_cache_key)
+            logger.debug("[CACHE] RESPONSE HIT for %s", response_key)
             return cached_response
-        logger.debug("[CACHE] RESPONSE CACHE MISS for %s", response_cache_key)
+        logger.debug("[CACHE] RESPONSE MISS for %s", response_key)
 
     try:
         todos = await _fetch_search_cache(
@@ -863,8 +1030,9 @@ async def _build_search_advanced_response(
         response = "\n\n---\n\n".join(formatted_todos)
 
         if ctx is not None:
-            await ctx.set_state(response_cache_key, response)
-            logger.debug("[CACHE] RESPONSE CACHE STORED for %s", response_cache_key)
+            await ctx.set_state(response_key, response)
+            await _track_cache_key(ctx, response_key)
+            logger.debug("[CACHE] RESPONSE STORED for %s", response_key)
 
         return response
     except Exception as e:
@@ -1029,6 +1197,10 @@ async def add_task(
         except Exception:
             location = "Unknown"
 
+        # Invalidate caches that may contain todo data
+        if ctx is not None:
+            await invalidate_todos_cache(ctx)
+
         return f"✅ Successfully created todo: {title} (ID: {task_id}) in {location}"
 
     except Exception as e:
@@ -1094,9 +1266,10 @@ async def add_new_project(
         if not project_id:
             return "Error: Failed to create project using AppleScript"
 
-        # Invalidate projects cache since we created a new project (when ctx available)
+        # Invalidate caches since we created a new project
         if ctx is not None:
             await invalidate_projects_cache(ctx)
+            await invalidate_todos_cache(ctx)  # Projects appear in searches/recent
 
         # Look up the project to get location information
         # Use cached data when ctx is available (MCP invocation), fallback to direct lookup otherwise
@@ -1197,6 +1370,10 @@ async def update_task(
             # Handle various success cases
             if "true" in str(success).lower():
                 logger.debug("Success case matched: 'true' in result")
+
+                # Invalidate caches since we updated a todo
+                if ctx is not None:
+                    await invalidate_todos_cache(ctx)
 
                 return f"✅ Successfully updated todo with ID: {id}"
             elif success.startswith("Error:"):
@@ -1300,6 +1477,11 @@ async def update_existing_project(
             # Handle various success cases
             if "true" in str(success).lower():
                 logger.debug("Success case matched: 'true' in result")
+
+                # Invalidate caches since we updated a project
+                if ctx is not None:
+                    await invalidate_projects_cache(ctx)
+                    await invalidate_todos_cache(ctx)  # Projects appear in searches/recent
 
                 return f"✅ Successfully updated project with ID: {id}"
             elif success.startswith("Error:"):
