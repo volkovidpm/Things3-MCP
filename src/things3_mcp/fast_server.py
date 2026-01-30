@@ -1,6 +1,7 @@
 """Things MCP Server implementation using the FastMCP pattern."""
 
 import asyncio
+import hashlib
 import json
 import random
 import traceback
@@ -64,6 +65,17 @@ def preprocess_array_params(**kwargs):
 # Centralized cache key definitions to prevent key mismatches in invalidation.
 # All cache keys should be defined here and used via these constants/functions.
 
+# Maximum number of cached responses to keep (FIFO eviction).
+# Sizing rationale: 500 entries covers typical session usage patterns:
+# - ~10-20 unique search queries
+# - ~50-100 tagged item views
+# - ~30 recent/period views
+# Each entry is mostly formatted text (a few KB), so total memory is modest (~1-5 MB).
+MAX_RESPONSE_CACHE_SIZE = 500
+
+# Maximum length for cache keys before hashing (to avoid excessively long keys)
+MAX_CACHE_KEY_LENGTH = 100
+
 
 class CacheKeys:
     """Centralized cache key definitions to prevent key mismatches."""
@@ -115,28 +127,40 @@ class CacheKeys:
     @staticmethod
     def search_todos_response(query: str) -> str:
         """Cache key for formatted search todos response."""
-        return f"search_todos_response_{query}"
+        base = f"search_todos_response_{query}"
+        if len(base) > MAX_CACHE_KEY_LENGTH:
+            hash_suffix = hashlib.sha256(query.encode()).hexdigest()[:16]
+            return f"search_todos_response_hash_{hash_suffix}"
+        return base
 
     @staticmethod
     def search_advanced_response(cache_key: str) -> str:
         """Cache key for formatted advanced search response."""
-        return f"search_advanced_response_{cache_key}"
+        base = f"search_advanced_response_{cache_key}"
+        if len(base) > MAX_CACHE_KEY_LENGTH:
+            hash_suffix = hashlib.sha256(cache_key.encode()).hexdigest()[:16]
+            return f"search_advanced_response_hash_{hash_suffix}"
+        return base
 
     # Individual search cache keys (avoid shared dict race condition)
     @staticmethod
     def search_raw(key: str) -> str:
         """Cache key for raw search data (individual keys to avoid race conditions)."""
-        return f"search_raw_{key}"
-
-
-# Maximum number of cached responses to keep (simple FIFO eviction)
-# Each unique search query, tag, period, etc. counts as one entry.
-# Cached data is mostly formatted strings, so memory per entry is modest.
-MAX_RESPONSE_CACHE_SIZE = 500
+        base = f"search_raw_{key}"
+        if len(base) > MAX_CACHE_KEY_LENGTH:
+            hash_suffix = hashlib.sha256(key.encode()).hexdigest()[:16]
+            return f"search_raw_hash_{hash_suffix}"
+        return base
 
 
 async def _track_cache_key(ctx: Context, key: str) -> None:
-    """Track cache keys for potential eviction."""
+    """Track cache keys for FIFO eviction when limit is exceeded.
+
+    Note: This function assumes single-threaded execution within an MCP session.
+    FastMCP processes requests sequentially per session, so there's no concurrent
+    access to the keys list within a session. If concurrent access becomes possible
+    in future FastMCP versions, this would need locking or atomic operations.
+    """
     keys_list = await ctx.get_state(CacheKeys.CACHE_KEYS_LIST)
     if keys_list is None:
         keys_list = []
@@ -145,7 +169,7 @@ async def _track_cache_key(ctx: Context, key: str) -> None:
     if key not in keys_list:
         keys_list.append(key)
 
-    # Evict oldest keys if over limit
+    # Evict oldest keys if over limit (FIFO - first added, first removed)
     while len(keys_list) > MAX_RESPONSE_CACHE_SIZE:
         old_key = keys_list.pop(0)
         await ctx.set_state(old_key, None)
@@ -202,18 +226,24 @@ async def invalidate_todos_cache(ctx: Context) -> None:
     This is broader because todos appear in search, recent, tagged items, etc.
     We invalidate the search_cache and response caches that might be stale.
     """
-    # Clear all search-related raw caches by clearing tracked keys
-    # This is a simple approach - a more sophisticated one would track
-    # which specific search keys need invalidation
     keys_list = await ctx.get_state(CacheKeys.CACHE_KEYS_LIST)
-    if keys_list:
-        for key in list(keys_list):
-            # Invalidate search, recent, and tagged items caches
-            if any(prefix in key for prefix in ["search_", "recent_", "tagged_items_"]):
-                await ctx.set_state(key, None)
-                keys_list.remove(key)
-                logger.debug("[CACHE] Invalidated todo-related cache: %s", key)
-        await ctx.set_state(CacheKeys.CACHE_KEYS_LIST, keys_list)
+    if not keys_list:
+        return
+
+    # Identify keys to invalidate (O(n) scan)
+    prefixes_to_clear = ("search_", "recent_", "tagged_items_")
+    keys_to_clear = [key for key in keys_list if any(key.startswith(p) for p in prefixes_to_clear)]
+
+    # Clear the cache entries
+    for key in keys_to_clear:
+        await ctx.set_state(key, None)
+        logger.debug("[CACHE] Invalidated todo-related cache: %s", key)
+
+    # Update the tracking list (O(n) list comprehension, not O(n²) remove calls)
+    if keys_to_clear:
+        keys_to_clear_set = set(keys_to_clear)  # O(1) lookups
+        updated_keys = [k for k in keys_list if k not in keys_to_clear_set]
+        await ctx.set_state(CacheKeys.CACHE_KEYS_LIST, updated_keys)
 
 
 async def invalidate_tags_cache(ctx: Context) -> None:
@@ -295,10 +325,22 @@ async def _fetch_areas_with_cache(ctx: Context | None, include_items: bool) -> l
 
 
 def _build_cache_key(prefix: str, params: dict[str, Any]) -> str:
+    """Build a cache key from prefix and params, hashing if too long.
+
+    Long cache keys (e.g., from complex search queries) are hashed to avoid
+    memory/key-length issues while maintaining uniqueness.
+    """
     if not params:
         return f"{prefix}:empty"
     serialised = json.dumps(params, sort_keys=True, default=str)
-    return f"{prefix}:{serialised}"
+    key = f"{prefix}:{serialised}"
+
+    # Hash long keys to avoid excessive memory usage and key-length issues
+    if len(key) > MAX_CACHE_KEY_LENGTH:
+        hash_suffix = hashlib.sha256(serialised.encode()).hexdigest()[:16]
+        return f"{prefix}:hash_{hash_suffix}"
+
+    return key
 
 
 async def _fetch_search_cache(
@@ -1269,6 +1311,7 @@ async def add_new_project(
         # Invalidate caches since we created a new project
         if ctx is not None:
             await invalidate_projects_cache(ctx)
+            await invalidate_areas_cache(ctx)  # Area item counts change
             await invalidate_todos_cache(ctx)  # Projects appear in searches/recent
 
         # Look up the project to get location information
@@ -1481,6 +1524,7 @@ async def update_existing_project(
                 # Invalidate caches since we updated a project
                 if ctx is not None:
                     await invalidate_projects_cache(ctx)
+                    await invalidate_areas_cache(ctx)  # Area item counts may change
                     await invalidate_todos_cache(ctx)  # Projects appear in searches/recent
 
                 return f"✅ Successfully updated project with ID: {id}"
