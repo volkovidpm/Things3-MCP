@@ -124,6 +124,19 @@ class CacheKeys:
         """Cache key for formatted recent items response."""
         return f"recent_response_{period}"
 
+    # List view response caches
+    INBOX_RESPONSE = "inbox_response"
+    TODAY_RESPONSE = "today_response"
+    UPCOMING_RESPONSE = "upcoming_response"
+    ANYTIME_RESPONSE = "anytime_response"
+    SOMEDAY_RESPONSE = "someday_response"
+    TRASH_RESPONSE = "trash_response"
+
+    @staticmethod
+    def logbook_response(period: str, limit: int) -> str:
+        """Cache key for formatted logbook response."""
+        return f"logbook_response_{period}_{limit}"
+
     @staticmethod
     def search_todos_response(query: str) -> str:
         """Cache key for formatted search todos response."""
@@ -223,15 +236,25 @@ async def invalidate_areas_cache(ctx: Context) -> None:
 async def invalidate_todos_cache(ctx: Context) -> None:
     """Invalidate caches that may contain todo data.
 
-    This is broader because todos appear in search, recent, tagged items, etc.
-    We invalidate the search_cache and response caches that might be stale.
+    This is broader because todos appear in search, recent, tagged items,
+    and all list views. We invalidate response caches that might be stale.
     """
+    # Clear fixed list view caches
+    await ctx.set_state(CacheKeys.INBOX_RESPONSE, None)
+    await ctx.set_state(CacheKeys.TODAY_RESPONSE, None)
+    await ctx.set_state(CacheKeys.UPCOMING_RESPONSE, None)
+    await ctx.set_state(CacheKeys.ANYTIME_RESPONSE, None)
+    await ctx.set_state(CacheKeys.SOMEDAY_RESPONSE, None)
+    await ctx.set_state(CacheKeys.TRASH_RESPONSE, None)
+
     keys_list = await ctx.get_state(CacheKeys.CACHE_KEYS_LIST)
     if not keys_list:
+        logger.debug("[CACHE] Invalidated list view caches (no tracked keys)")
         return
 
-    # Identify keys to invalidate (O(n) scan)
-    prefixes_to_clear = ("search_", "recent_", "tagged_items_")
+    # Identify dynamic keys to invalidate (O(n) scan)
+    # Includes search, recent, tagged items, and logbook (which has period/limit params)
+    prefixes_to_clear = ("search_", "recent_", "tagged_items_", "logbook_")
     keys_to_clear = [key for key in keys_list if any(key.startswith(p) for p in prefixes_to_clear)]
 
     # Clear the cache entries
@@ -505,9 +528,14 @@ def register_tool(name: str):
 # LIST VIEWS
 
 
-@register_tool(name="get_inbox")
-def get_inbox() -> str:
-    """Get todos from Inbox."""
+async def _build_inbox_response(ctx: Context | None) -> str:
+    """Build inbox response with response-level caching."""
+    if ctx is not None:
+        cached = await ctx.get_state(CacheKeys.INBOX_RESPONSE)
+        if cached is not None:
+            logger.debug("[CACHE] HIT for inbox_response")
+            return cached
+
     import time
 
     start_time = time.time()
@@ -521,16 +549,38 @@ def get_inbox() -> str:
             return "No items found in Inbox"
 
         formatted_todos = [format_todo(todo) for todo in todos]
+        response = "\n\n---\n\n".join(formatted_todos)
         log_operation_end("get-inbox", True, time.time() - start_time, count=len(todos))
-        return "\n\n---\n\n".join(formatted_todos)
+
+        if ctx is not None:
+            await ctx.set_state(CacheKeys.INBOX_RESPONSE, response)
+            logger.debug("[CACHE] STORED inbox_response")
+
+        return response
     except Exception as e:
         log_operation_end("get-inbox", False, time.time() - start_time, error=str(e))
         raise
 
 
-@register_tool(name="get_today")
-def get_today() -> str:
-    """Get todos due today."""
+@register_tool(name="get_inbox")
+async def _get_inbox_tool(ctx: Context | None = None) -> str:
+    """Get todos from Inbox (cached per session)."""
+    return await _build_inbox_response(ctx)
+
+
+def get_inbox() -> str:
+    """Get todos from Inbox."""
+    return asyncio.run(_build_inbox_response(None))
+
+
+async def _build_today_response(ctx: Context | None) -> str:
+    """Build today response with response-level caching."""
+    if ctx is not None:
+        cached = await ctx.get_state(CacheKeys.TODAY_RESPONSE)
+        if cached is not None:
+            logger.debug("[CACHE] HIT for today_response")
+            return cached
+
     import time
 
     start_time = time.time()
@@ -544,8 +594,14 @@ def get_today() -> str:
             return "No items due today"
 
         formatted_todos = [format_todo(todo) for todo in todos]
+        response = "\n\n---\n\n".join(formatted_todos)
         log_operation_end("get-today", True, time.time() - start_time, count=len(todos))
-        return "\n\n---\n\n".join(formatted_todos)
+
+        if ctx is not None:
+            await ctx.set_state(CacheKeys.TODAY_RESPONSE, response)
+            logger.debug("[CACHE] STORED today_response")
+
+        return response
     except TypeError as e:
         if "'<' not supported between instances of 'NoneType' and 'str'" in str(e):
             # Handle the known sorting bug in things.today() by using a workaround
@@ -593,10 +649,17 @@ def get_today() -> str:
 
                 result.sort(key=safe_sort_key)
                 formatted_todos = [format_todo(todo) for todo in result]
+                response = "\n\n---\n\n".join(formatted_todos)
+
                 # Only log success AFTER the fallback actually succeeds
                 if result:
                     log_operation_end("get-today", True, time.time() - start_time, count=len(result))
-                    return "\n\n---\n\n".join(formatted_todos)
+
+                    if ctx is not None:
+                        await ctx.set_state(CacheKeys.TODAY_RESPONSE, response)
+                        logger.debug("[CACHE] STORED today_response (fallback)")
+
+                    return response
                 else:
                     log_operation_end("get-today", True, time.time() - start_time, count=0)
                     return "No items due today"
@@ -612,28 +675,83 @@ def get_today() -> str:
         raise
 
 
-@register_tool(name="get_upcoming")
-def get_upcoming() -> str:
-    """Get all upcoming todos (those with a start date in the future)."""
+@register_tool(name="get_today")
+async def _get_today_tool(ctx: Context | None = None) -> str:
+    """Get todos due today (cached per session)."""
+    return await _build_today_response(ctx)
+
+
+def get_today() -> str:
+    """Get todos due today."""
+    return asyncio.run(_build_today_response(None))
+
+
+async def _build_upcoming_response(ctx: Context | None) -> str:
+    """Build upcoming response with response-level caching."""
+    if ctx is not None:
+        cached = await ctx.get_state(CacheKeys.UPCOMING_RESPONSE)
+        if cached is not None:
+            logger.debug("[CACHE] HIT for upcoming_response")
+            return cached
+
     todos = things.upcoming(include_items=True)
 
     if not todos:
         return "No upcoming items"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    response = "\n\n---\n\n".join(formatted_todos)
+
+    if ctx is not None:
+        await ctx.set_state(CacheKeys.UPCOMING_RESPONSE, response)
+        logger.debug("[CACHE] STORED upcoming_response")
+
+    return response
 
 
-@register_tool(name="get_anytime")
-def get_anytime() -> str:
-    """Get all todos from Anytime list. Note that this will return an extensive list of tasks. It is generally recommended to use get_todos with filters or search_todos instead."""
+@register_tool(name="get_upcoming")
+async def _get_upcoming_tool(ctx: Context | None = None) -> str:
+    """Get all upcoming todos (cached per session)."""
+    return await _build_upcoming_response(ctx)
+
+
+def get_upcoming() -> str:
+    """Get all upcoming todos (those with a start date in the future)."""
+    return asyncio.run(_build_upcoming_response(None))
+
+
+async def _build_anytime_response(ctx: Context | None) -> str:
+    """Build anytime response with response-level caching."""
+    if ctx is not None:
+        cached = await ctx.get_state(CacheKeys.ANYTIME_RESPONSE)
+        if cached is not None:
+            logger.debug("[CACHE] HIT for anytime_response")
+            return cached
+
     todos = things.anytime(include_items=True)
 
     if not todos:
         return "No items in Anytime list"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    response = "\n\n---\n\n".join(formatted_todos)
+
+    if ctx is not None:
+        await ctx.set_state(CacheKeys.ANYTIME_RESPONSE, response)
+        logger.debug("[CACHE] STORED anytime_response")
+
+    return response
+
+
+@register_tool(name="get_anytime")
+async def _get_anytime_tool(ctx: Context | None = None) -> str:
+    """Get all todos from Anytime list (cached per session)."""
+    return await _build_anytime_response(ctx)
+
+
+def get_anytime() -> str:
+    """Get all todos from Anytime list. Note that this will return an extensive list of tasks."""
+    return asyncio.run(_build_anytime_response(None))
 
 
 @register_tool(name="get_random_inbox")
@@ -706,27 +824,50 @@ def get_random_anytime(count: int = 5) -> str:
     return "\n\n---\n\n".join(formatted)
 
 
-@register_tool(name="get_someday")
-def get_someday() -> str:
-    """Get todos from Someday list."""
+async def _build_someday_response(ctx: Context | None) -> str:
+    """Build someday response with response-level caching."""
+    if ctx is not None:
+        cached = await ctx.get_state(CacheKeys.SOMEDAY_RESPONSE)
+        if cached is not None:
+            logger.debug("[CACHE] HIT for someday_response")
+            return cached
+
     todos = things.someday(include_items=True)
 
     if not todos:
         return "No items in Someday list"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    response = "\n\n---\n\n".join(formatted_todos)
+
+    if ctx is not None:
+        await ctx.set_state(CacheKeys.SOMEDAY_RESPONSE, response)
+        logger.debug("[CACHE] STORED someday_response")
+
+    return response
 
 
-@register_tool(name="get_logbook")
-def get_logbook(period: str = "7d", limit: int = 50) -> str:
-    """Get completed todos from Logbook, defaults to last 7 days.
+@register_tool(name="get_someday")
+async def _get_someday_tool(ctx: Context | None = None) -> str:
+    """Get todos from Someday list (cached per session)."""
+    return await _build_someday_response(ctx)
 
-    Args:
-    ----
-        period: Time period to look back (e.g., '3d', '1w', '2m', '1y'). Defaults to '7d'.
-        limit: Maximum number of entries to return. Defaults to 50.
-    """
+
+def get_someday() -> str:
+    """Get todos from Someday list."""
+    return asyncio.run(_build_someday_response(None))
+
+
+async def _build_logbook_response(period: str, limit: int, ctx: Context | None) -> str:
+    """Build logbook response with response-level caching."""
+    cache_key = CacheKeys.logbook_response(period, limit)
+
+    if ctx is not None:
+        cached = await ctx.get_state(cache_key)
+        if cached is not None:
+            logger.debug("[CACHE] HIT for %s", cache_key)
+            return cached
+
     import time
     from datetime import datetime, timedelta
 
@@ -770,8 +911,15 @@ def get_logbook(period: str = "7d", limit: int = 50) -> str:
             todos = todos[:limit]
 
         formatted_todos = [format_todo(todo) for todo in todos]
+        response = "\n\n---\n\n".join(formatted_todos)
         log_operation_end("get-logbook", True, time.time() - start_time, count=len(todos))
-        return "\n\n---\n\n".join(formatted_todos)
+
+        if ctx is not None:
+            await ctx.set_state(cache_key, response)
+            await _track_cache_key(ctx, cache_key)
+            logger.debug("[CACHE] STORED %s", cache_key)
+
+        return response
 
     except ValueError as e:
         log_operation_end("get-logbook", False, time.time() - start_time, error=str(e))
@@ -781,16 +929,55 @@ def get_logbook(period: str = "7d", limit: int = 50) -> str:
         raise
 
 
-@register_tool(name="get_trash")
-def get_trash() -> str:
-    """Get trashed todos."""
+@register_tool(name="get_logbook")
+async def _get_logbook_tool(period: str = "7d", limit: int = 50, ctx: Context | None = None) -> str:
+    """Get completed todos from Logbook (cached per session)."""
+    return await _build_logbook_response(period, limit, ctx)
+
+
+def get_logbook(period: str = "7d", limit: int = 50) -> str:
+    """Get completed todos from Logbook, defaults to last 7 days.
+
+    Args:
+    ----
+        period: Time period to look back (e.g., '3d', '1w', '2m', '1y'). Defaults to '7d'.
+        limit: Maximum number of entries to return. Defaults to 50.
+    """
+    return asyncio.run(_build_logbook_response(period, limit, None))
+
+
+async def _build_trash_response(ctx: Context | None) -> str:
+    """Build trash response with response-level caching."""
+    if ctx is not None:
+        cached = await ctx.get_state(CacheKeys.TRASH_RESPONSE)
+        if cached is not None:
+            logger.debug("[CACHE] HIT for trash_response")
+            return cached
+
     todos = things.trash(include_items=True)
 
     if not todos:
         return "No items in trash"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    response = "\n\n---\n\n".join(formatted_todos)
+
+    if ctx is not None:
+        await ctx.set_state(CacheKeys.TRASH_RESPONSE, response)
+        logger.debug("[CACHE] STORED trash_response")
+
+    return response
+
+
+@register_tool(name="get_trash")
+async def _get_trash_tool(ctx: Context | None = None) -> str:
+    """Get trashed todos (cached per session)."""
+    return await _build_trash_response(ctx)
+
+
+def get_trash() -> str:
+    """Get trashed todos."""
+    return asyncio.run(_build_trash_response(None))
 
 
 @register_tool(name="get_todos")

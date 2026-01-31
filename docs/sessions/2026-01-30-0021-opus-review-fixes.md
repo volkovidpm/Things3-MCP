@@ -57,4 +57,19 @@ Address all issues identified in the Claude Opus code review of the caching impl
 
 ## Commits
 
-1. `ea7d38a` - Address Opus code review findings for cache implementation
+1. `4d6f0d5` - Address Opus code review findings for cache implementation
+2. `d8b7a75` - Add response caching to list view operations (Phase 4)
+
+### Phase 4 Benchmark Results
+
+| Operation | Cold | Warm | Status |
+|-----------|------|------|--------|
+| get_inbox | 14ms | **1.4ms** | ✅ |
+| get_today | 163ms | **1.4ms** | ✅ |
+| get_upcoming | 7ms | **6.5ms** | ✅ |
+| get_anytime | 7.3s | **6.3ms** | ✅ |
+| get_someday | 137ms | **1.4ms** | ✅ |
+| get_logbook | 107ms | **1.4ms** | ✅ |
+| get_trash | 3.9s | **7.1ms** | ✅ |
+
+All list views now achieve <10ms warm cache performance.
