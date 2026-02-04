@@ -4,6 +4,7 @@ Focuses on verifying API response format and structure without exposing actual d
 """
 
 from things3_mcp.fast_server import (
+    ITEM_SEPARATOR,
     get_anytime,
     get_areas,
     get_inbox,
@@ -107,7 +108,7 @@ def test_get_inbox():
 
     if result != "No items found in Inbox":
         # Split multiple items if present
-        todos = result.split("\n\n---\n\n")
+        todos = result.split(ITEM_SEPARATOR)
         for todo in todos:
             assert verify_todo_format(todo), f"Todo format is incorrect: {todo}"
 
@@ -118,7 +119,7 @@ def test_get_today():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No items due today":
-        todos = result.split("\n\n---\n\n")
+        todos = result.split(ITEM_SEPARATOR)
         for todo in todos:
             assert verify_todo_format(todo), f"Todo format is incorrect: {todo}"
 
@@ -129,7 +130,7 @@ def test_get_upcoming():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No upcoming items":
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
 
@@ -140,7 +141,7 @@ def test_get_anytime():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No items in Anytime list":
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_todo_format(item), f"Todo format is incorrect: {item}"
 
@@ -151,7 +152,7 @@ def test_get_someday():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No items in Someday list":
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_todo_format(item), f"Todo format is incorrect: {item}"
 
@@ -162,7 +163,7 @@ def test_get_logbook():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No completed items found":
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
         assert len(items) <= 50, "Should respect item limit"
@@ -174,7 +175,7 @@ def test_get_trash():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No items in trash":
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
 
@@ -186,7 +187,7 @@ def test_get_random_inbox():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No items found in Inbox":
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         # Should return at most 5 items by default
         assert len(items) <= 5, f"Should return at most 5 items, got {len(items)}"
         for item in items:
@@ -197,7 +198,7 @@ def test_get_random_inbox():
     assert isinstance(result_3, str), "Should return a string"
 
     if result_3 != "No items found in Inbox":
-        items_3 = result_3.split("\n\n---\n\n")
+        items_3 = result_3.split(ITEM_SEPARATOR)
         assert len(items_3) <= 3, f"Should return at most 3 items, got {len(items_3)}"
         for item in items_3:
             assert verify_todo_format(item), f"Item format is incorrect: {item}"
@@ -214,7 +215,7 @@ def test_get_random_anytime():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No items in Anytime list":
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         # Should return at most 5 items by default
         assert len(items) <= 5, f"Should return at most 5 items, got {len(items)}"
         for item in items:
@@ -226,7 +227,7 @@ def test_get_random_anytime():
     assert isinstance(result_2, str), "Should return a string"
 
     if result_2 != "No items in Anytime list":
-        items_2 = result_2.split("\n\n---\n\n")
+        items_2 = result_2.split(ITEM_SEPARATOR)
         assert len(items_2) <= 2, f"Should return at most 2 items, got {len(items_2)}"
         for item in items_2:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
@@ -239,7 +240,7 @@ def test_get_random_todos():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No todos found":
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         # Should return at most 5 items by default
         assert len(items) <= 5, f"Should return at most 5 items, got {len(items)}"
         for item in items:
@@ -250,7 +251,7 @@ def test_get_random_todos():
     assert isinstance(result_4, str), "Should return a string"
 
     if result_4 != "No todos found":
-        items_4 = result_4.split("\n\n---\n\n")
+        items_4 = result_4.split(ITEM_SEPARATOR)
         assert len(items_4) <= 4, f"Should return at most 4 items, got {len(items_4)}"
         for item in items_4:
             assert verify_todo_format(item), f"Item format is incorrect: {item}"
@@ -271,7 +272,7 @@ def test_get_random_todos_with_project():
                 assert isinstance(result, str), "Should return a string"
 
                 if result != "No todos found":
-                    todos = result.split("\n\n---\n\n")
+                    todos = result.split(ITEM_SEPARATOR)
                     assert len(todos) <= 3, f"Should return at most 3 items, got {len(todos)}"
                     for todo in todos:
                         assert verify_todo_format(todo), f"Todo format is incorrect: {todo}"
@@ -308,7 +309,7 @@ def test_get_todos_with_project():
                 assert isinstance(result, str), "Should return a string"
 
                 if result != "No todos found":
-                    todos = result.split("\n\n---\n\n")
+                    todos = result.split(ITEM_SEPARATOR)
                     for todo in todos:
                         assert verify_todo_format(todo), f"Todo format is incorrect: {todo}"
                 break
@@ -320,7 +321,7 @@ def test_get_projects_with_items():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No projects found":
-        projects = result.split("\n\n---\n\n")
+        projects = result.split(ITEM_SEPARATOR)
         for project in projects:
             assert verify_project_format(project), f"Project format is incorrect: {project}"
             # If project has items, they should be properly formatted
@@ -337,7 +338,7 @@ def test_get_areas_with_items():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No areas found":
-        areas = result.split("\n\n---\n\n")
+        areas = result.split(ITEM_SEPARATOR)
         for area in areas:
             assert verify_area_format(area), f"Area format is incorrect: {area}"
             # If area has items, they should be properly formatted
@@ -354,7 +355,7 @@ def test_get_tags():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No tags found":
-        tags = result.split("\n\n---\n\n")
+        tags = result.split(ITEM_SEPARATOR)
         for tag in tags:
             assert verify_tag_format(tag), f"Tag format is incorrect: {tag}"
 
@@ -374,7 +375,7 @@ def test_get_tagged_items():
                 assert isinstance(result, str), "Should return a string"
 
                 if not result.startswith("No items found with tag"):
-                    items = result.split("\n\n---\n\n")
+                    items = result.split(ITEM_SEPARATOR)
                     for item in items:
                         assert verify_item_format(item), f"Item format is incorrect: {item}"
                 break
@@ -387,7 +388,7 @@ def test_search_todos():
     assert isinstance(result, str), "Should return a string"
 
     if not result.startswith("No todos found matching"):
-        todos = result.split("\n\n---\n\n")
+        todos = result.split(ITEM_SEPARATOR)
         for todo in todos:
             assert verify_todo_format(todo), f"Todo format is incorrect: {todo}"
 
@@ -406,7 +407,7 @@ def test_search_advanced(test_namespace):
 
             # Handle both success and error cases
             if "No items found" not in result and "Error in advanced search" not in result:
-                items = result.split("\n\n---\n\n")
+                items = result.split(ITEM_SEPARATOR)
                 for item in items:
                     assert verify_item_format(item), f"Item format is incorrect: {item}"
             elif "Error in advanced search" in result:
@@ -431,7 +432,7 @@ def test_get_recent():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No recent items found":
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
 
@@ -480,7 +481,7 @@ def test_multiple_tag_filtering():
             # If we have results, verify format
             # Handle both success and error cases
             if "No items found" not in result and "Error in advanced search" not in result:
-                items = result.split("\n\n---\n\n")
+                items = result.split(ITEM_SEPARATOR)
                 for item in items:
                     assert verify_item_format(item), f"Item format is incorrect: {item}"
             elif "Error in advanced search" in result:
@@ -499,7 +500,7 @@ def test_search_with_emoji():
 
         # Should either return no results or valid formatted results
         if "No todos found" not in result:
-            items = result.split("\n\n---\n\n")
+            items = result.split(ITEM_SEPARATOR)
             for item in items:
                 assert verify_item_format(item), f"Item format is incorrect for emoji {emoji}: {item}"
 
@@ -515,7 +516,7 @@ def test_search_advanced_with_emoji():
 
         # Should either return error for invalid tag or valid formatted results
         if "Error in advanced search" not in result and "No items found" not in result:
-            items = result.split("\n\n---\n\n")
+            items = result.split(ITEM_SEPARATOR)
             for item in items:
                 assert verify_item_format(item), f"Item format is incorrect for emoji tag {emoji}: {item}"
 
@@ -534,7 +535,7 @@ def test_mcp_search_items_basic():
 
     # Should either return no results or valid formatted results
     if "No items found matching" not in result:
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
 
@@ -557,7 +558,7 @@ def test_mcp_search_items_special_characters():
 
         # Should either return no results or valid formatted results
         if "No items found matching" not in result:
-            items = result.split("\n\n---\n\n")
+            items = result.split(ITEM_SEPARATOR)
             for item in items:
                 assert verify_item_format(item), f"Item format is incorrect for query '{query}': {item}"
 
@@ -573,7 +574,7 @@ def test_mcp_show_item_inbox():
 
     # Should either return no items or valid formatted results
     if "No items found in Inbox" not in result:
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
 
@@ -588,7 +589,7 @@ def test_mcp_show_item_today():
 
     # Should either return no items or valid formatted results
     if "No items due today" not in result:
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
 
@@ -600,7 +601,7 @@ def test_mcp_show_item_upcoming():
 
     # Should either return no items or valid formatted results
     if "No upcoming items" not in result:
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
 
@@ -612,7 +613,7 @@ def test_mcp_show_item_anytime():
 
     # Should either return no items or valid formatted results
     if "No items in Anytime list" not in result:
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
 
@@ -624,7 +625,7 @@ def test_mcp_show_item_someday():
 
     # Should either return no items or valid formatted results
     if "No items in Someday list" not in result:
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
 
@@ -636,7 +637,7 @@ def test_mcp_show_item_logbook():
 
     # Should either return no items or valid formatted results
     if "No completed items found" not in result:
-        items = result.split("\n\n---\n\n")
+        items = result.split(ITEM_SEPARATOR)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
 
@@ -699,8 +700,8 @@ def test_mcp_endpoints_consistency():
     # Both should have similar structure (though content may differ due to different search scopes)
     if "No todos found" not in direct_search and "No items found" not in mcp_search:
         # Both should use the same item separator
-        direct_items = direct_search.split("\n\n---\n\n")
-        mcp_items = mcp_search.split("\n\n---\n\n")
+        direct_items = direct_search.split(ITEM_SEPARATOR)
+        mcp_items = mcp_search.split(ITEM_SEPARATOR)
 
         # Verify format consistency
         for item in direct_items:
@@ -732,6 +733,6 @@ def test_mcp_search_comprehensive():
 
         # Should either return no results or valid formatted results
         if "No items found matching" not in result:
-            items = result.split("\n\n---\n\n")
+            items = result.split(ITEM_SEPARATOR)
             for item in items:
                 assert verify_item_format(item), f"Item format incorrect for query '{query}': {item}"

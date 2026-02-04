@@ -30,6 +30,10 @@ from .logging_config import (
 setup_logging(console_level="INFO", file_level="DEBUG", structured_logs=True)
 logger = get_logger(__name__)
 
+# Item separator for formatted output. Uses box-drawing character (═) instead of
+# markdown dash (-) to avoid conflicts with LLM-generated notes containing "---".
+ITEM_SEPARATOR = "\n\n════════════════════════════════════════\n\n"
+
 
 def preprocess_array_params(**kwargs):
     """Preprocess parameters to handle MCP framework array serialization issues.
@@ -422,7 +426,7 @@ async def _build_tags_response(include_items: bool, ctx: Context | None) -> str:
         return "No tags found"
 
     formatted_tags = [format_tag(tag, include_items) for tag in tags]
-    response = "\n\n---\n\n".join(formatted_tags)
+    response = ITEM_SEPARATOR.join(formatted_tags)
 
     if ctx is not None:
         await ctx.set_state(response_key, response)
@@ -455,7 +459,7 @@ async def _build_tagged_items_response(tag: str, ctx: Context | None) -> str:
         return f"No items found with tag '{tag}'"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    response = "\n\n---\n\n".join(formatted_todos)
+    response = ITEM_SEPARATOR.join(formatted_todos)
 
     if ctx is not None:
         await ctx.set_state(response_key, response)
@@ -501,7 +505,7 @@ async def _build_recent_response(period: str, ctx: Context | None) -> str:
         elif item.get("type") == "project":
             formatted_items.append(format_project(item, include_items=False))
 
-    response = "\n\n---\n\n".join(formatted_items)
+    response = ITEM_SEPARATOR.join(formatted_items)
 
     if ctx is not None:
         await ctx.set_state(response_key, response)
@@ -924,7 +928,7 @@ async def _build_inbox_response(ctx: Context | None) -> str:
             return "No items found in Inbox"
 
         formatted_todos = [format_todo(todo) for todo in todos]
-        response = "\n\n---\n\n".join(formatted_todos)
+        response = ITEM_SEPARATOR.join(formatted_todos)
         log_operation_end("get-inbox", True, time.time() - start_time, count=len(todos))
 
         if ctx is not None:
@@ -969,7 +973,7 @@ async def _build_today_response(ctx: Context | None) -> str:
             return "No items due today"
 
         formatted_todos = [format_todo(todo) for todo in todos]
-        response = "\n\n---\n\n".join(formatted_todos)
+        response = ITEM_SEPARATOR.join(formatted_todos)
         log_operation_end("get-today", True, time.time() - start_time, count=len(todos))
 
         if ctx is not None:
@@ -1024,7 +1028,7 @@ async def _build_today_response(ctx: Context | None) -> str:
 
                 result.sort(key=safe_sort_key)
                 formatted_todos = [format_todo(todo) for todo in result]
-                response = "\n\n---\n\n".join(formatted_todos)
+                response = ITEM_SEPARATOR.join(formatted_todos)
 
                 # Only log success AFTER the fallback actually succeeds
                 if result:
@@ -1075,7 +1079,7 @@ async def _build_upcoming_response(ctx: Context | None) -> str:
         return "No upcoming items"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    response = "\n\n---\n\n".join(formatted_todos)
+    response = ITEM_SEPARATOR.join(formatted_todos)
 
     if ctx is not None:
         await ctx.set_state(CacheKeys.UPCOMING_RESPONSE, response)
@@ -1109,7 +1113,7 @@ async def _build_anytime_response(ctx: Context | None) -> str:
         return "No items in Anytime list"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    response = "\n\n---\n\n".join(formatted_todos)
+    response = ITEM_SEPARATOR.join(formatted_todos)
 
     if ctx is not None:
         await ctx.set_state(CacheKeys.ANYTIME_RESPONSE, response)
@@ -1163,7 +1167,7 @@ def get_random_inbox(count: int = 5) -> str:
 
         formatted = [format_todo(item) for item in sampled]
         log_operation_end("get-random-inbox", True, time.time() - start_time, count=len(sampled))
-        return "\n\n---\n\n".join(formatted)
+        return ITEM_SEPARATOR.join(formatted)
     except Exception as e:
         log_operation_end("get-random-inbox", False, time.time() - start_time, error=str(e))
         raise
@@ -1196,7 +1200,7 @@ def get_random_anytime(count: int = 5) -> str:
         return "No items in Anytime list"
 
     formatted = [format_todo(item) for item in sampled]
-    return "\n\n---\n\n".join(formatted)
+    return ITEM_SEPARATOR.join(formatted)
 
 
 async def _build_someday_response(ctx: Context | None) -> str:
@@ -1213,7 +1217,7 @@ async def _build_someday_response(ctx: Context | None) -> str:
         return "No items in Someday list"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    response = "\n\n---\n\n".join(formatted_todos)
+    response = ITEM_SEPARATOR.join(formatted_todos)
 
     if ctx is not None:
         await ctx.set_state(CacheKeys.SOMEDAY_RESPONSE, response)
@@ -1286,7 +1290,7 @@ async def _build_logbook_response(period: str, limit: int, ctx: Context | None) 
             todos = todos[:limit]
 
         formatted_todos = [format_todo(todo) for todo in todos]
-        response = "\n\n---\n\n".join(formatted_todos)
+        response = ITEM_SEPARATOR.join(formatted_todos)
         log_operation_end("get-logbook", True, time.time() - start_time, count=len(todos))
 
         if ctx is not None:
@@ -1335,7 +1339,7 @@ async def _build_trash_response(ctx: Context | None) -> str:
         return "No items in trash"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    response = "\n\n---\n\n".join(formatted_todos)
+    response = ITEM_SEPARATOR.join(formatted_todos)
 
     if ctx is not None:
         await ctx.set_state(CacheKeys.TRASH_RESPONSE, response)
@@ -1374,7 +1378,7 @@ def get_todos(project_uuid: str | None = None) -> str:
         return "No todos found"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    return ITEM_SEPARATOR.join(formatted_todos)
 
 
 @register_tool(name="get_random_todos")
@@ -1407,7 +1411,7 @@ def get_random_todos(project_uuid: str | None = None, count: int = 5) -> str:
         return "No todos found"
 
     formatted = [format_todo(todo) for todo in sampled]
-    return "\n\n---\n\n".join(formatted)
+    return ITEM_SEPARATOR.join(formatted)
 
 
 async def _build_projects_response(include_items: bool, ctx: Context | None) -> str:
@@ -1427,7 +1431,7 @@ async def _build_projects_response(include_items: bool, ctx: Context | None) -> 
         return "No projects found"
 
     formatted_projects = [format_project(project, include_items) for project in projects]
-    response = "\n\n---\n\n".join(formatted_projects)
+    response = ITEM_SEPARATOR.join(formatted_projects)
 
     if ctx is not None:
         await ctx.set_state(response_key, response)
@@ -1470,7 +1474,7 @@ async def _build_areas_response(include_items: bool, ctx: Context | None) -> str
         return "No areas found"
 
     formatted_areas = [format_area(area, include_items) for area in areas]
-    response = "\n\n---\n\n".join(formatted_areas)
+    response = ITEM_SEPARATOR.join(formatted_areas)
 
     if ctx is not None:
         await ctx.set_state(response_key, response)
@@ -1558,7 +1562,7 @@ async def _build_search_todos_response(query: str, ctx: Context | None) -> str:
         return f"No todos found matching '{query}'"
 
     formatted_todos = [format_todo(todo) for todo in todos]
-    response = "\n\n---\n\n".join(formatted_todos)
+    response = ITEM_SEPARATOR.join(formatted_todos)
 
     if ctx is not None:
         await ctx.set_state(response_key, response)
@@ -1631,7 +1635,7 @@ async def _build_search_advanced_response(
             return "No items found matching your search criteria"
 
         formatted_todos = [format_todo(todo) for todo in todos]
-        response = "\n\n---\n\n".join(formatted_todos)
+        response = ITEM_SEPARATOR.join(formatted_todos)
 
         if ctx is not None:
             await ctx.set_state(response_key, response)
@@ -2174,7 +2178,7 @@ def search_all_items(query: str) -> str:
             return f"No items found matching '{query}'"
 
         formatted_todos = [format_todo(todo) for todo in todos]
-        return "\n\n---\n\n".join(formatted_todos)
+        return ITEM_SEPARATOR.join(formatted_todos)
     except Exception as e:
         logger.error(f"Error searching: {e!s}")
         return f"Error searching: {e!s}"
