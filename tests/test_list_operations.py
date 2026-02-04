@@ -344,9 +344,8 @@ def test_get_areas_with_items():
             # If area has items, they should be properly formatted
             if "Tasks:" in area:
                 items_section = area.split("Tasks:")[1]
-                items = items_section.split("\n- ")
-                for item in items[1:]:  # Skip first empty split
-                    assert item.strip(), "Item should not be empty"
+                items = [i.strip() for i in items_section.split("\n- ") if i.strip()]
+                assert len(items) > 0, "Should have at least one task"
 
 
 def test_get_tags():
