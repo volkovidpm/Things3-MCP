@@ -515,6 +515,381 @@ async def _build_recent_response(period: str, ctx: Context | None) -> str:
 mcp = FastMCP("Things", instructions="Interact with the Things 3 task management app")
 
 
+# =============================================================================
+# MCP RESOURCES - Read-only reference data
+# =============================================================================
+
+
+@mcp.resource("things://schema/todo")
+def todo_schema() -> str:
+    """JSON schema describing Things todo fields."""
+    return json.dumps(
+        {
+            "type": "todo",
+            "fields": {
+                "uuid": {"type": "string", "description": "Unique identifier for the todo"},
+                "title": {"type": "string", "description": "Title of the todo"},
+                "notes": {"type": "string", "description": "Notes/description for the todo"},
+                "status": {
+                    "type": "string",
+                    "enum": ["incomplete", "completed", "canceled"],
+                    "description": "Current status of the todo",
+                },
+                "start": {
+                    "type": "string",
+                    "enum": ["Inbox", "Anytime", "Someday"],
+                    "description": "Which list the todo belongs to",
+                },
+                "start_date": {"type": "string", "format": "date", "description": "When the todo is scheduled (YYYY-MM-DD)"},
+                "deadline": {"type": "string", "format": "date", "description": "Deadline for the todo (YYYY-MM-DD)"},
+                "stop_date": {"type": "string", "format": "date", "description": "When the todo was completed (YYYY-MM-DD)"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags applied to the todo"},
+                "project": {"type": "string", "description": "UUID of the parent project (if any)"},
+                "area": {"type": "string", "description": "UUID of the parent area (if any)"},
+                "checklist": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"title": {"type": "string"}, "status": {"type": "string"}}},
+                    "description": "Checklist items within the todo",
+                },
+            },
+            "usage": {
+                "add_todo": "Use title, notes, when, deadline, tags, list_id, list_title",
+                "update_todo": "Use id plus any fields to update",
+            },
+        },
+        indent=2,
+    )
+
+
+@mcp.resource("things://schema/project")
+def project_schema() -> str:
+    """JSON schema describing Things project fields."""
+    return json.dumps(
+        {
+            "type": "project",
+            "fields": {
+                "uuid": {"type": "string", "description": "Unique identifier for the project"},
+                "title": {"type": "string", "description": "Title of the project"},
+                "notes": {"type": "string", "description": "Notes/description for the project"},
+                "status": {
+                    "type": "string",
+                    "enum": ["incomplete", "completed", "canceled"],
+                    "description": "Current status of the project",
+                },
+                "start": {
+                    "type": "string",
+                    "enum": ["Inbox", "Anytime", "Someday"],
+                    "description": "Which list the project belongs to",
+                },
+                "start_date": {"type": "string", "format": "date", "description": "When the project is scheduled (YYYY-MM-DD)"},
+                "deadline": {"type": "string", "format": "date", "description": "Deadline for the project (YYYY-MM-DD)"},
+                "stop_date": {"type": "string", "format": "date", "description": "When the project was completed (YYYY-MM-DD)"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags applied to the project"},
+                "area": {"type": "string", "description": "UUID of the parent area (if any)"},
+                "items": {
+                    "type": "array",
+                    "items": {"$ref": "#/definitions/todo"},
+                    "description": "Todos within the project",
+                },
+            },
+            "usage": {
+                "add_project": "Use title, notes, when, deadline, tags, area_id, area_title, todos",
+                "update_project": "Use id plus any fields to update",
+            },
+        },
+        indent=2,
+    )
+
+
+@mcp.resource("things://lists")
+def available_lists() -> str:
+    """Available Things list views and their descriptions."""
+    return json.dumps(
+        {
+            "system_lists": [
+                {"name": "Inbox", "tool": "get_inbox", "description": "Uncategorized items awaiting processing"},
+                {"name": "Today", "tool": "get_today", "description": "Tasks scheduled for today"},
+                {"name": "Upcoming", "tool": "get_upcoming", "description": "Tasks scheduled for future dates"},
+                {"name": "Anytime", "tool": "get_anytime", "description": "Tasks available to do anytime (no specific date)"},
+                {"name": "Someday", "tool": "get_someday", "description": "Tasks deferred for someday/maybe"},
+                {"name": "Logbook", "tool": "get_logbook", "description": "Completed tasks (archived)"},
+                {"name": "Trash", "tool": "get_trash", "description": "Deleted items"},
+            ],
+            "when_values": {
+                "description": "Valid values for the 'when' parameter in add_todo/update_todo",
+                "values": ["today", "tomorrow", "evening", "anytime", "someday", "YYYY-MM-DD"],
+            },
+            "list_name_values": {
+                "description": "Valid values for list_name parameter in update_todo/update_project",
+                "todo_values": ["Inbox", "Today", "Anytime", "Someday"],
+                "project_values": ["Today", "Anytime", "Someday", "Trash"],
+                "note": "Projects cannot be moved to Inbox. To archive, mark as completed.",
+            },
+        },
+        indent=2,
+    )
+
+
+@mcp.resource("things://status-values")
+def status_values() -> str:
+    """Valid status values for todos and projects."""
+    return json.dumps(
+        {
+            "status_values": {
+                "incomplete": "Active item, not yet done",
+                "completed": "Item has been finished",
+                "canceled": "Item was canceled/abandoned",
+            },
+            "usage": {
+                "filtering": "Use status parameter in search_advanced: status='incomplete'",
+                "updating": "Use completed=True or canceled=True in update_todo/update_project",
+            },
+            "note": "Items default to 'incomplete' when created",
+        },
+        indent=2,
+    )
+
+
+@mcp.resource("things://areas")
+async def areas_resource(ctx: Context | None = None) -> str:
+    """All areas with their UUIDs for reference when assigning tasks."""
+    # Try to use cached data if we have a valid session context
+    try:
+        areas = await _fetch_areas_with_cache(ctx, include_items=False) if ctx else things.areas()
+    except RuntimeError:
+        # No session context available, fall back to direct lookup
+        areas = things.areas()
+    return json.dumps(
+        {
+            "count": len(areas),
+            "areas": [{"title": a["title"], "uuid": a["uuid"]} for a in areas],
+            "usage": "Use area_id or area_title parameter in add_todo, add_project, or update_project",
+        },
+        indent=2,
+    )
+
+
+@mcp.resource("things://projects")
+async def projects_resource(ctx: Context | None = None) -> str:
+    """All projects with their UUIDs for reference when assigning tasks."""
+    # Try to use cached data if we have a valid session context
+    try:
+        projects = await _fetch_projects_with_cache(ctx, include_items=False) if ctx else things.projects()
+    except RuntimeError:
+        # No session context available, fall back to direct lookup
+        projects = things.projects()
+    return json.dumps(
+        {
+            "count": len(projects),
+            "projects": [{"title": p["title"], "uuid": p["uuid"], "status": p.get("status", "incomplete")} for p in projects],
+            "usage": "Use list_id (project UUID) or list_title parameter in add_todo",
+        },
+        indent=2,
+    )
+
+
+@mcp.resource("things://tags")
+async def tags_resource(ctx: Context | None = None) -> str:
+    """All tags for reference when tagging items."""
+    # Try to use cached data if we have a valid session context
+    try:
+        tags = await _fetch_search_cache(ctx, "tags_raw", lambda: things.tags(), label="tags_resource") if ctx else things.tags()
+    except RuntimeError:
+        # No session context available, fall back to direct lookup
+        tags = things.tags()
+    return json.dumps(
+        {
+            "count": len(tags),
+            "tags": [t["title"] for t in tags],
+            "usage": "Use tags parameter (array of strings) in add_todo, add_project, update_todo, update_project",
+        },
+        indent=2,
+    )
+
+
+# =============================================================================
+# MCP PROMPTS - GTD workflow templates
+# =============================================================================
+
+
+@mcp.prompt(name="weekly_review")
+def weekly_review_prompt() -> str:
+    """GTD weekly review workflow - guides through a complete review."""
+    return """Please help me conduct a GTD weekly review. Follow these steps:
+
+## 1. Get Clear - Process Inbox
+First, let's check what needs processing:
+- Call `get_inbox` to see unprocessed items
+- For each item, help me decide: Do it (< 2 min), Delegate, Defer, or Delete
+- Move items to appropriate lists using `update_todo`
+
+## 2. Get Current - Review Active Work
+Review what's in flight:
+- Call `get_today` to review today's commitments
+- Call `get_projects` with include_items=True to see all active projects
+- Identify any projects missing next actions
+- Check for stalled projects that need attention
+
+## 3. Review Areas of Responsibility
+For each area of my life/work:
+- Call `get_areas` with include_items=True
+- Check if each area has appropriate active projects
+- Identify any neglected areas
+
+## 4. Review Someday/Maybe
+Check deferred items:
+- Call `get_someday` to review items I've put off
+- Ask: Is any of this now relevant? Should anything be activated?
+- Move relevant items to Anytime or Today
+
+## 5. Review Completed Work
+Acknowledge progress:
+- Call `get_logbook` with period='7d' to see what was accomplished
+- Celebrate wins and note patterns
+
+## 6. Plan Ahead
+Look at what's coming:
+- Call `get_upcoming` to see scheduled items
+- Call `search_advanced` with deadline parameter to find approaching deadlines
+- Ensure important deadlines have next actions
+
+Let's start with step 1. I'll call get_inbox now."""
+
+
+@mcp.prompt(name="daily_planning")
+def daily_planning_prompt() -> str:
+    """Morning planning routine template."""
+    return """Let's plan your day effectively. Here's the routine:
+
+## 1. Review Today's List
+- Call `get_today` to see what's already scheduled
+- Check if the list is realistic for today
+
+## 2. Check Inbox Quickly
+- Call `get_inbox` to see if anything urgent arrived
+- Process quick items (< 2 min) or defer to appropriate lists
+
+## 3. Check Upcoming Deadlines
+- Call `search_advanced` with deadline parameter for the next few days
+- Ensure critical deadlines have today's actions
+
+## 4. Review Active Projects
+- Call `get_projects` to see project status
+- For your top 3 priorities, ensure they have next actions on Today
+
+## 5. Time-Block Planning
+Based on your Today list, I can help you:
+- Identify your 3 most important tasks (MITs)
+- Suggest task grouping by context or energy level
+- Flag any tasks that might need more time than expected
+
+Let's start by seeing what's on your plate. I'll call get_today now."""
+
+
+@mcp.prompt(name="inbox_processing")
+def inbox_processing_prompt() -> str:
+    """GTD inbox-to-zero workflow."""
+    return """Let's process your inbox to zero using the GTD methodology.
+
+For each item in your inbox, we'll ask:
+1. **What is it?** - Clarify the item
+2. **Is it actionable?**
+   - No → Delete, archive as reference, or move to Someday
+   - Yes → Continue to step 3
+3. **What's the next action?**
+   - If < 2 minutes: Do it now
+   - If you're not the best person: Delegate it
+   - Otherwise: Defer it (schedule or add to Anytime)
+4. **Is it part of a project?**
+   - If multiple steps needed, create or link to a project
+
+## Processing Commands
+- Move to Today: `update_todo` with when='today'
+- Move to Anytime: `update_todo` with when='anytime'
+- Move to Someday: `update_todo` with when='someday'
+- Add to Project: `update_todo` with list_id='<project-uuid>'
+- Delete: `update_todo` with canceled=True
+
+Let me get your inbox items now with `get_inbox`, and we'll process them one by one."""
+
+
+@mcp.prompt(name="priority_matrix")
+def priority_matrix_prompt() -> str:
+    """Eisenhower matrix prioritization template."""
+    return """Let's prioritize your tasks using the Eisenhower Matrix.
+
+## The Four Quadrants
+
+| | Urgent | Not Urgent |
+|---|---|---|
+| **Important** | Q1: DO FIRST | Q2: SCHEDULE |
+| **Not Important** | Q3: DELEGATE | Q4: ELIMINATE |
+
+## Process
+
+1. **Gather Tasks**
+   - I'll call `get_today` and `get_anytime` to see your active tasks
+
+2. **For Each Task, Ask:**
+   - Is this important? (Contributes to goals/values)
+   - Is this urgent? (Time-sensitive deadline)
+
+3. **Sort Into Quadrants:**
+   - **Q1 (Do First):** Important + Urgent → Keep on Today, do immediately
+   - **Q2 (Schedule):** Important + Not Urgent → Schedule specific time, protect from Q1 overflow
+   - **Q3 (Delegate):** Not Important + Urgent → Can someone else do this?
+   - **Q4 (Eliminate):** Not Important + Not Urgent → Consider deleting or moving to Someday
+
+4. **Actions I Can Help With:**
+   - `update_todo` with when='today' for Q1 items
+   - `update_todo` with when='YYYY-MM-DD' for Q2 items
+   - `update_todo` with when='someday' for Q4 items
+   - `update_todo` with canceled=True to eliminate
+
+Let me gather your tasks. I'll start with get_today."""
+
+
+@mcp.prompt(name="project_review")
+def project_review_prompt(project_title: str) -> str:
+    """Review a specific project's status and next actions.
+
+    Args:
+        project_title: The title of the project to review
+    """
+    return f"""Let's review the project "{project_title}" in detail.
+
+## Review Steps
+
+1. **Find the Project**
+   - I'll search for "{project_title}" using `search_todos` or `get_projects`
+
+2. **Project Health Check**
+   - Does it have a clear outcome defined?
+   - Is there a current next action?
+   - Are there any blocked tasks?
+   - Is the deadline realistic?
+
+3. **Task Analysis**
+   - Review all tasks within the project
+   - Identify completed vs remaining work
+   - Check for tasks that are:
+     - Stalled (no progress)
+     - Waiting on something/someone
+     - Ready to do next
+
+4. **Next Actions**
+   For each issue found, I can help:
+   - `add_todo` to add missing next actions
+   - `update_todo` to reschedule or reprioritize tasks
+   - `update_project` to adjust project deadline or notes
+
+5. **Project Outcome**
+   - Is the project still relevant?
+   - Should it be completed, paused (Someday), or canceled?
+
+Let me find the project "{project_title}" now."""
+
+
 def register_tool(name: str):
     """Register a tool while preserving the original callable for internal reuse."""
 
