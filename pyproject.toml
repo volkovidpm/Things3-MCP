@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
     "httpx>=0.28.1",
     "mcp[cli]>=1.2.0",
-    "fastmcp>=3.0.0b1",
+    "fastmcp>=3.0.0b1", # FastMCP 3.0 APIs currently require beta; revisit when stable is available.
     "things-py>=0.0.15",
 ]
 

@@ -29,6 +29,28 @@ This MCP server unlocks the power of AI for your task management:
 - Support for nested data (projects within areas, todos within projects)
 - Checklist/Subtask support - Read and display existing checklist items from todos
 
+## Built on FastMCP 3.0
+
+This is one of the first MCP servers to adopt [FastMCP 3.0](https://github.com/jlowin/fastmcp), bringing you a faster, more reliable experience.
+
+### Faster Responses
+
+The first time you ask Claude about your projects or areas, it fetches the data from Things. After that, responses come back almost instantly — up to 73% faster — because the server remembers what it already looked up during your conversation.
+
+### Built-in Productivity Workflows
+
+Ask Claude to use one of the included GTD workflow prompts:
+
+- **Weekly Review** — A guided 6-step GTD weekly review
+- **Daily Planning** — Structure your morning planning routine
+- **Inbox Processing** — Get to inbox zero using the GTD methodology
+- **Priority Matrix** — Prioritize tasks using the Eisenhower matrix
+- **Project Review** — Deep-dive into a specific project's health
+
+### Reliable Connections
+
+Every tool has a built-in timeout, so if something goes wrong you'll get a clear error message instead of Claude hanging indefinitely.
+
 ## Installation
 
 #### Prerequisites
@@ -318,7 +340,7 @@ uv pip install -e ".[dev]"  # Install in development mode with extra dependencie
 Run the comprehensive test suite to ensure everything is working as expected:
 
 ```bash
-# Run all tests (116 tests, ~3-4 minutes)
+# Run all tests (125 tests, ~7 minutes)
 uv run pytest
 
 # Run tests with coverage report
@@ -335,7 +357,7 @@ uv run pytest -k "error_handling"
 ```
 
 **Test Configuration:**
-- **116 comprehensive tests** covering all functionality
+- **125 comprehensive tests** covering all functionality (last run: 125 passed in ~7 minutes)
 - **Automatic cleanup** - tests don't affect your existing Things data
 - **Edge case coverage** - malformed UUIDs, timeouts, error conditions
 - **Integration testing** - tests against real Things app

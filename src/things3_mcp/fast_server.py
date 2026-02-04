@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import random
 import traceback
 from collections.abc import Callable
@@ -80,6 +81,17 @@ MAX_RESPONSE_CACHE_SIZE = 500
 # Maximum length for cache keys before hashing (to avoid excessively long keys)
 MAX_CACHE_KEY_LENGTH = 100
 
+# =============================================================================
+# TOOL TIMEOUT CONFIGURATION
+# =============================================================================
+# Timeouts in seconds for different tool categories.
+# Prevents hung connections when Things API is slow or unresponsive.
+
+TIMEOUT_LIST_VIEW = 15.0  # Simple list reads (inbox, today, etc.)
+TIMEOUT_HEAVY_READ = 45.0  # Reads with nested items (projects, areas, logbook)
+TIMEOUT_SEARCH = 60.0  # Search operations that may scan large datasets
+TIMEOUT_WRITE = 30.0  # Write operations (add/update via AppleScript)
+
 
 class CacheKeys:
     """Centralized cache key definitions to prevent key mismatches."""
@@ -90,6 +102,8 @@ class CacheKeys:
 
     # Cache tracking key (for size limits)
     CACHE_KEYS_LIST = "_cache_keys_list"
+    # TEMP: peak size tracking during test runs; remove after measuring.
+    CACHE_PEAK_SIZE = "_cache_peak_size"
 
     # Raw data caches with include_items variants
     @staticmethod
@@ -192,6 +206,16 @@ async def _track_cache_key(ctx: Context, key: str) -> None:
         await ctx.set_state(old_key, None)
         logger.debug("[CACHE] Evicted old cache key: %s", old_key)
 
+    # TEMP: track peak cache size per session to validate limit choice.
+    peak_size = await ctx.get_state(CacheKeys.CACHE_PEAK_SIZE) or 0
+    if len(keys_list) > peak_size:
+        await ctx.set_state(CacheKeys.CACHE_PEAK_SIZE, len(keys_list))
+        if os.getenv("THINGS_MCP_CACHE_METRICS"):
+            logger.info("[CACHE] Peak cache size updated: %d", len(keys_list))
+            print(f"[CACHE] Peak cache size updated: {len(keys_list)}")  # TEMP: visible without log streaming
+        else:
+            logger.debug("[CACHE] Peak cache size updated: %d", len(keys_list))
+
     await ctx.set_state(CacheKeys.CACHE_KEYS_LIST, keys_list)
 
 
@@ -211,6 +235,27 @@ async def invalidate_all_caches(ctx: Context) -> None:
     # Also clear the lookup caches
     await ctx.set_state(CacheKeys.AREAS_LOOKUP, None)
     await ctx.set_state(CacheKeys.PROJECTS_LOOKUP, None)
+
+    # Clear list view response caches (not tracked in keys list)
+    await ctx.set_state(CacheKeys.INBOX_RESPONSE, None)
+    await ctx.set_state(CacheKeys.TODAY_RESPONSE, None)
+    await ctx.set_state(CacheKeys.UPCOMING_RESPONSE, None)
+    await ctx.set_state(CacheKeys.ANYTIME_RESPONSE, None)
+    await ctx.set_state(CacheKeys.SOMEDAY_RESPONSE, None)
+    await ctx.set_state(CacheKeys.TRASH_RESPONSE, None)
+
+    # Clear cached responses and raw data in case they were not tracked
+    await ctx.set_state(CacheKeys.tags_response(True), None)
+    await ctx.set_state(CacheKeys.tags_response(False), None)
+    await ctx.set_state(CacheKeys.search_raw("tags_raw"), None)
+    await ctx.set_state(CacheKeys.projects_raw(True), None)
+    await ctx.set_state(CacheKeys.projects_raw(False), None)
+    await ctx.set_state(CacheKeys.projects_response(True), None)
+    await ctx.set_state(CacheKeys.projects_response(False), None)
+    await ctx.set_state(CacheKeys.areas_raw(True), None)
+    await ctx.set_state(CacheKeys.areas_raw(False), None)
+    await ctx.set_state(CacheKeys.areas_response(True), None)
+    await ctx.set_state(CacheKeys.areas_response(False), None)
     logger.debug("[CACHE] Invalidated all caches")
 
 
@@ -251,6 +296,11 @@ async def invalidate_todos_cache(ctx: Context) -> None:
     await ctx.set_state(CacheKeys.SOMEDAY_RESPONSE, None)
     await ctx.set_state(CacheKeys.TRASH_RESPONSE, None)
 
+    # Clear caches that embed todo data in other views
+    await invalidate_projects_cache(ctx)
+    await invalidate_areas_cache(ctx)
+    await invalidate_tags_cache(ctx)
+
     keys_list = await ctx.get_state(CacheKeys.CACHE_KEYS_LIST)
     if not keys_list:
         logger.debug("[CACHE] Invalidated list view caches (no tracked keys)")
@@ -277,6 +327,7 @@ async def invalidate_tags_cache(ctx: Context) -> None:
     """Invalidate tag-related caches."""
     await ctx.set_state(CacheKeys.tags_response(True), None)
     await ctx.set_state(CacheKeys.tags_response(False), None)
+    await ctx.set_state(CacheKeys.search_raw("tags_raw"), None)
     logger.debug("[CACHE] Invalidated tags caches")
 
 
@@ -894,11 +945,17 @@ def project_review_prompt(project_title: str) -> str:
 Let me find the project "{project_title}" now."""
 
 
-def register_tool(name: str):
-    """Register a tool while preserving the original callable for internal reuse."""
+def register_tool(name: str, *, timeout: float | None = None):
+    """Register a tool while preserving the original callable for internal reuse.
+
+    Args:
+        name: The tool name exposed to MCP clients.
+        timeout: Execution timeout in seconds. If the tool exceeds this duration,
+            an MCP error is returned to the client. Use TIMEOUT_* constants.
+    """
 
     def decorator(func):
-        mcp.tool(name=name)(func)
+        mcp.tool(name=name, timeout=timeout)(func)
         return func
 
     return decorator
@@ -941,7 +998,7 @@ async def _build_inbox_response(ctx: Context | None) -> str:
         raise
 
 
-@register_tool(name="get_inbox")
+@register_tool(name="get_inbox", timeout=TIMEOUT_LIST_VIEW)
 async def _get_inbox_tool(ctx: Context | None = None) -> str:
     """Get todos from Inbox (cached per session)."""
     return await _build_inbox_response(ctx)
@@ -1054,7 +1111,7 @@ async def _build_today_response(ctx: Context | None) -> str:
         raise
 
 
-@register_tool(name="get_today")
+@register_tool(name="get_today", timeout=TIMEOUT_LIST_VIEW)
 async def _get_today_tool(ctx: Context | None = None) -> str:
     """Get todos due today (cached per session)."""
     return await _build_today_response(ctx)
@@ -1088,7 +1145,7 @@ async def _build_upcoming_response(ctx: Context | None) -> str:
     return response
 
 
-@register_tool(name="get_upcoming")
+@register_tool(name="get_upcoming", timeout=TIMEOUT_LIST_VIEW)
 async def _get_upcoming_tool(ctx: Context | None = None) -> str:
     """Get all upcoming todos (cached per session)."""
     return await _build_upcoming_response(ctx)
@@ -1122,7 +1179,7 @@ async def _build_anytime_response(ctx: Context | None) -> str:
     return response
 
 
-@register_tool(name="get_anytime")
+@register_tool(name="get_anytime", timeout=TIMEOUT_LIST_VIEW)
 async def _get_anytime_tool(ctx: Context | None = None) -> str:
     """Get all todos from Anytime list (cached per session)."""
     return await _build_anytime_response(ctx)
@@ -1133,7 +1190,7 @@ def get_anytime() -> str:
     return asyncio.run(_build_anytime_response(None))
 
 
-@register_tool(name="get_random_inbox")
+@register_tool(name="get_random_inbox", timeout=TIMEOUT_LIST_VIEW)
 def get_random_inbox(count: int = 5) -> str:
     """Get a random sample of todos from Inbox.
 
@@ -1173,7 +1230,7 @@ def get_random_inbox(count: int = 5) -> str:
         raise
 
 
-@register_tool(name="get_random_anytime")
+@register_tool(name="get_random_anytime", timeout=TIMEOUT_LIST_VIEW)
 def get_random_anytime(count: int = 5) -> str:
     """Get a random sample of items from the Anytime list.
 
@@ -1226,7 +1283,7 @@ async def _build_someday_response(ctx: Context | None) -> str:
     return response
 
 
-@register_tool(name="get_someday")
+@register_tool(name="get_someday", timeout=TIMEOUT_LIST_VIEW)
 async def _get_someday_tool(ctx: Context | None = None) -> str:
     """Get todos from Someday list (cached per session)."""
     return await _build_someday_response(ctx)
@@ -1308,7 +1365,7 @@ async def _build_logbook_response(period: str, limit: int, ctx: Context | None) 
         raise
 
 
-@register_tool(name="get_logbook")
+@register_tool(name="get_logbook", timeout=TIMEOUT_HEAVY_READ)
 async def _get_logbook_tool(period: str = "7d", limit: int = 50, ctx: Context | None = None) -> str:
     """Get completed todos from Logbook (cached per session)."""
     return await _build_logbook_response(period, limit, ctx)
@@ -1348,7 +1405,7 @@ async def _build_trash_response(ctx: Context | None) -> str:
     return response
 
 
-@register_tool(name="get_trash")
+@register_tool(name="get_trash", timeout=TIMEOUT_LIST_VIEW)
 async def _get_trash_tool(ctx: Context | None = None) -> str:
     """Get trashed todos (cached per session)."""
     return await _build_trash_response(ctx)
@@ -1359,7 +1416,7 @@ def get_trash() -> str:
     return asyncio.run(_build_trash_response(None))
 
 
-@register_tool(name="get_todos")
+@register_tool(name="get_todos", timeout=TIMEOUT_LIST_VIEW)
 def get_todos(project_uuid: str | None = None) -> str:
     """Get todos from Things, optionally filtered by project.
 
@@ -1381,7 +1438,7 @@ def get_todos(project_uuid: str | None = None) -> str:
     return ITEM_SEPARATOR.join(formatted_todos)
 
 
-@register_tool(name="get_random_todos")
+@register_tool(name="get_random_todos", timeout=TIMEOUT_LIST_VIEW)
 def get_random_todos(project_uuid: str | None = None, count: int = 5) -> str:
     """Get a random sample of todos, optionally filtered by project.
 
@@ -1441,7 +1498,7 @@ async def _build_projects_response(include_items: bool, ctx: Context | None) -> 
     return response
 
 
-@register_tool(name="get_projects")
+@register_tool(name="get_projects", timeout=TIMEOUT_HEAVY_READ)
 async def _get_projects_tool(include_items: bool = False, ctx: Context | None = None) -> str:
     """Get all projects from Things via MCP (cached per session)."""
     return await _build_projects_response(include_items, ctx)
@@ -1484,7 +1541,7 @@ async def _build_areas_response(include_items: bool, ctx: Context | None) -> str
     return response
 
 
-@register_tool(name="get_areas")
+@register_tool(name="get_areas", timeout=TIMEOUT_HEAVY_READ)
 async def _get_areas_tool(include_items: bool = False, ctx: Context | None = None) -> str:
     """Get all areas from Things via MCP (cached per session)."""
     return await _build_areas_response(include_items, ctx)
@@ -1503,7 +1560,7 @@ def get_areas(include_items: bool = False) -> str:
 # TAG OPERATIONS
 
 
-@register_tool(name="get_tags")
+@register_tool(name="get_tags", timeout=TIMEOUT_LIST_VIEW)
 async def _get_tags_tool(include_items: bool = False, ctx: Context | None = None) -> str:
     """Get all tags via MCP (cached per session)."""
     return await _build_tags_response(include_items, ctx)
@@ -1519,7 +1576,7 @@ def get_tags(include_items: bool = False) -> str:
     return asyncio.run(_build_tags_response(include_items, None))
 
 
-@register_tool(name="get_tagged_items")
+@register_tool(name="get_tagged_items", timeout=TIMEOUT_LIST_VIEW)
 async def _get_tagged_items_tool(tag: str, ctx: Context | None = None) -> str:
     """Get items with a specific tag via MCP (cached per session)."""
     return await _build_tagged_items_response(tag, ctx)
@@ -1572,7 +1629,7 @@ async def _build_search_todos_response(query: str, ctx: Context | None) -> str:
     return response
 
 
-@register_tool(name="search_todos")
+@register_tool(name="search_todos", timeout=TIMEOUT_SEARCH)
 async def _search_todos_tool(query: str, ctx: Context | None = None) -> str:
     """Search todos by title or notes (cached per session)."""
     return await _build_search_todos_response(query, ctx)
@@ -1647,7 +1704,7 @@ async def _build_search_advanced_response(
         return f"Error in advanced search: {e!s}"
 
 
-@register_tool(name="search_advanced")
+@register_tool(name="search_advanced", timeout=TIMEOUT_SEARCH)
 async def _search_advanced_tool(
     status: str | None = None,
     start_date: str | None = None,
@@ -1704,17 +1761,16 @@ def search_advanced(
 # MODIFICATION OPERATIONS
 
 
-@register_tool(name="add_todo")
+@register_tool(name="add_todo", timeout=TIMEOUT_WRITE)
 async def add_task(
     title: str,
-    *,
-    ctx: Context | None = None,
     notes: str | None = None,
     when: str | None = None,
     deadline: str | None = None,
     tags: list[str] | str | None = None,
     list_id: str | None = None,
     list_title: str | None = None,
+    ctx: Context | None = None,
 ) -> str:
     """Create a new todo in Things.
 
@@ -1819,7 +1875,7 @@ async def add_task(
         return f"⚠️ Error creating todo: {e!s}"
 
 
-@register_tool(name="add_project")
+@register_tool(name="add_project", timeout=TIMEOUT_WRITE)
 async def add_new_project(
     title: str,
     notes: str | None = None,
@@ -1829,7 +1885,6 @@ async def add_new_project(
     area_id: str | None = None,
     area_title: str | None = None,
     todos: list[str] | str | None = None,
-    *,
     ctx: Context | None = None,
 ) -> str:
     """Create a new project in Things.
@@ -1912,7 +1967,7 @@ async def add_new_project(
         return f"⚠️ Error creating project: {e!s}"
 
 
-@register_tool(name="update_todo")
+@register_tool(name="update_todo", timeout=TIMEOUT_WRITE)
 async def update_task(
     id: str,
     title: str | None = None,
@@ -1924,7 +1979,6 @@ async def update_task(
     canceled: bool | None = None,
     list_id: str | None = None,
     list_name: str | None = None,
-    *,
     ctx: Context | None = None,
 ) -> str:
     """Update an existing todo in Things.
@@ -2003,7 +2057,7 @@ async def update_task(
         return f"⚠️ Error updating todo: {e!s}"
 
 
-@register_tool(name="update_project")
+@register_tool(name="update_project", timeout=TIMEOUT_WRITE)
 async def update_existing_project(
     id: str,
     title: str | None = None,
@@ -2016,7 +2070,6 @@ async def update_existing_project(
     list_name: str | None = None,
     area_title: str | None = None,
     area_id: str | None = None,
-    *,
     ctx: Context | None = None,
 ) -> str:
     """Update an existing project in Things.
@@ -2112,7 +2165,7 @@ async def update_existing_project(
         return f"⚠️ Error updating project: {e!s}"
 
 
-@register_tool(name="show_item")
+@register_tool(name="show_item", timeout=TIMEOUT_LIST_VIEW)
 def show_item(id: str, query: str | None = None, filter_tags: list[str] | None = None) -> str:
     """Show a specific item or list in Things.
 
@@ -2162,7 +2215,7 @@ def show_item(id: str, query: str | None = None, filter_tags: list[str] | None =
         return f"Error showing item: {e!s}"
 
 
-@register_tool(name="search_items")
+@register_tool(name="search_items", timeout=TIMEOUT_SEARCH)
 def search_all_items(query: str) -> str:
     """Search for items in Things.
 
@@ -2184,7 +2237,7 @@ def search_all_items(query: str) -> str:
         return f"Error searching: {e!s}"
 
 
-@register_tool(name="get_recent")
+@register_tool(name="get_recent", timeout=TIMEOUT_LIST_VIEW)
 async def _get_recent_tool(period: str, ctx: Context | None = None) -> str:
     """Get recently created items via MCP (cached per session)."""
     try:
