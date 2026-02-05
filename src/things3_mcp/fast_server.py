@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import os
 import random
 import traceback
 from collections.abc import Callable
@@ -102,8 +101,6 @@ class CacheKeys:
 
     # Cache tracking key (for size limits)
     CACHE_KEYS_LIST = "_cache_keys_list"
-    # TEMP: peak size tracking during test runs; remove after measuring.
-    CACHE_PEAK_SIZE = "_cache_peak_size"
 
     # Raw data caches with include_items variants
     @staticmethod
@@ -205,16 +202,6 @@ async def _track_cache_key(ctx: Context, key: str) -> None:
         old_key = keys_list.pop(0)
         await ctx.set_state(old_key, None)
         logger.debug("[CACHE] Evicted old cache key: %s", old_key)
-
-    # TEMP: track peak cache size per session to validate limit choice.
-    peak_size = await ctx.get_state(CacheKeys.CACHE_PEAK_SIZE) or 0
-    if len(keys_list) > peak_size:
-        await ctx.set_state(CacheKeys.CACHE_PEAK_SIZE, len(keys_list))
-        if os.getenv("THINGS_MCP_CACHE_METRICS"):
-            logger.info("[CACHE] Peak cache size updated: %d", len(keys_list))
-            print(f"[CACHE] Peak cache size updated: {len(keys_list)}")  # TEMP: visible without log streaming
-        else:
-            logger.debug("[CACHE] Peak cache size updated: %d", len(keys_list))
 
     await ctx.set_state(CacheKeys.CACHE_KEYS_LIST, keys_list)
 
