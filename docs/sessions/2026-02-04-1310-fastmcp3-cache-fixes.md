@@ -88,3 +88,21 @@ Prefer a conservative invalidation approach (clear projects/areas/tags caches wh
 ### Update - 2026-02-04 14:03 Europe/Dublin
 
 **Summary**: Added temporary `print()` of peak cache size when `THINGS_MCP_CACHE_METRICS=1` so it shows up without log streaming.
+
+### Update - 2026-02-04 14:10 Europe/Dublin
+
+**Summary**: User ran full test suite with `THINGS_MCP_CACHE_METRICS=1` and saw no cache output. Explanation: tests call direct functions without a FastMCP `Context`, so `_track_cache_key` never runs and no peak is recorded. Next step is a small synthetic run with a fake `Context` or a real MCP session to capture a peak cache size.
+
+### Update - 2026-02-04 14:18 Europe/Dublin
+
+**Summary**: Added temporary cache peak probe script in `tmp/cache_peak_probe.py` to measure cache key volume using a fake FastMCP context and read-only calls.
+
+### Update - 2026-02-04 14:22 Europe/Dublin
+
+**Summary**: Removed temporary cache-peak instrumentation and probe script after measuring peak size (31). Ran lint/format/mypy successfully. Pytest still fails in sandbox due to Things app not running (autouse readiness assertion).
+
+**Checks**:
+- `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .` (pass)
+- `UV_CACHE_DIR=/tmp/uv-cache uv run ruff format --check .` (pass)
+- `UV_CACHE_DIR=/tmp/uv-cache uv run mypy src/` (pass)
+- `HOME=/tmp UV_CACHE_DIR=/tmp/uv-cache uv run pytest --cov=things3_mcp --cov-report=term-missing` (failed: Things app not running)

@@ -22,7 +22,21 @@
       "Bash(codex:*)",
       "Bash(gh run:*)",
       "Bash(uv pip:*)",
-      "Bash(uv run safety scan --help:*)"
+      "Bash(uv run safety scan --help:*)",
+      "WebFetch(domain:gofastmcp.com)",
+      "Bash(uv run python:*)",
+      "Bash(uv run ruff check:*)",
+      "Bash(git checkout:*)",
+      "Bash(uv run:*)",
+      "Bash(TZ='Europe/Dublin' date:*)",
+      "Bash(git -C /Users/ross/Development/Things3-MCP diff --stat)",
+      "Bash(git -C /Users/ross/Development/Things3-MCP diff src/things3_mcp/fast_server.py)",
+      "Bash(git -C /Users/ross/Development/Things3-MCP log --oneline -5)",
+      "Bash(git -C /Users/ross/Development/Things3-MCP log --oneline -3)",
+      "Bash(git -C /Users/ross/Development/Things3-MCP add tests/test_list_operations.py)",
+      "Bash(git -C /Users/ross/Development/Things3-MCP commit -m \"$\\(cat <<''EOF''\nFix test_get_areas_with_items handling of empty item splits\n\nFilter empty strings when splitting task lists instead of assuming\nonly one empty element at the start. Handles areas with extra\nnewlines in the formatter output.\nEOF\n\\)\")",
+      "WebFetch(domain:support.claude.com)",
+      "WebFetch(domain:www.anthropic.com)"
     ],
     "deny": [],
     "ask": []
