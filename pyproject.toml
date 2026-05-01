@@ -224,3 +224,9 @@ dev = [
     "safety>=3.6.0",
     "twine>=6.1.0",
 ]
+
+[tool.uv]
+# 7-day dependency cooldown: refuse package versions published in the last
+# week so freshly-uploaded malicious releases (typically caught within that
+# window) are excluded from the resolver.
+exclude-newer = "1 week"
