@@ -21,10 +21,20 @@ from .logging_config import (
     log_operation_start,
     setup_logging,
 )
+from .providers import ProviderError, get_provider
 
 # Configure enhanced logging
 setup_logging(console_level="INFO", file_level="DEBUG", structured_logs=True)
 logger = get_logger(__name__)
+
+
+def _provider_error_response(error: ProviderError) -> str:
+    """Render provider failures as clear MCP tool output instead of hangs."""
+    return str(error)
+
+
+def _format_todo_items(items: list[dict], provider) -> str:
+    return "\n\n---\n\n".join(format_todo(item, get_item=provider.get) for item in items)
 
 
 def preprocess_array_params(**kwargs):
@@ -70,15 +80,18 @@ def get_inbox() -> str:
     log_operation_start("get-inbox")
 
     try:
-        todos = things.inbox(include_items=True)
+        provider = get_provider()
+        todos = provider.inbox(include_items=True)
 
         if not todos:
             log_operation_end("get-inbox", True, time.time() - start_time, count=0)
             return "No items found in Inbox"
 
-        formatted_todos = [format_todo(todo) for todo in todos]
         log_operation_end("get-inbox", True, time.time() - start_time, count=len(todos))
-        return "\n\n---\n\n".join(formatted_todos)
+        return _format_todo_items(todos, provider)
+    except ProviderError as e:
+        log_operation_end("get-inbox", False, time.time() - start_time, error=str(e))
+        return _provider_error_response(e)
     except Exception as e:
         log_operation_end("get-inbox", False, time.time() - start_time, error=str(e))
         raise
@@ -93,76 +106,18 @@ def get_today() -> str:
     log_operation_start("get-today")
 
     try:
-        todos = things.today(include_items=True)
+        provider = get_provider()
+        todos = provider.today(include_items=True)
 
         if not todos:
             log_operation_end("get-today", True, time.time() - start_time, count=0)
             return "No items due today"
 
-        formatted_todos = [format_todo(todo) for todo in todos]
         log_operation_end("get-today", True, time.time() - start_time, count=len(todos))
-        return "\n\n---\n\n".join(formatted_todos)
-    except TypeError as e:
-        if "'<' not supported between instances of 'NoneType' and 'str'" in str(e):
-            # Handle the known sorting bug in things.today() by using a workaround
-            try:
-                # Replicate the exact logic from things.today() but with safe sorting
-                import datetime
-
-                datetime.date.today().strftime("%Y-%m-%d")
-
-                # Replicate the three categories from things.today():
-                # 1. regular_today_tasks: start_date=True (today), start="Anytime", index="todayIndex"
-                regular_today_tasks = things.tasks(
-                    start_date=True,  # today
-                    start="Anytime",
-                    index="todayIndex",
-                    status="incomplete",
-                    include_items=True,
-                )
-
-                # 2. unconfirmed_scheduled_tasks: start_date="past", start="Someday", index="todayIndex"
-                unconfirmed_scheduled_tasks = things.tasks(start_date="past", start="Someday", index="todayIndex", status="incomplete", include_items=True)
-
-                # 3. unconfirmed_overdue_tasks: start_date=False, deadline="past", deadline_suppressed=False
-                unconfirmed_overdue_tasks = things.tasks(start_date=False, deadline="past", deadline_suppressed=False, status="incomplete", include_items=True)
-
-                # Combine all three categories like the original
-                result = [
-                    *regular_today_tasks,
-                    *unconfirmed_scheduled_tasks,
-                    *unconfirmed_overdue_tasks,
-                ]
-
-                if not result:
-                    return "No items due today"
-
-                # Sort manually with None-safe comparison
-                def safe_sort_key(task):
-                    today_index = task.get("today_index")
-                    if today_index is None:
-                        today_index = 999999  # Put items without today_index at the end
-                    start_date = task.get("start_date")
-                    if start_date is None:
-                        start_date = ""
-                    return (today_index, start_date)
-
-                result.sort(key=safe_sort_key)
-                formatted_todos = [format_todo(todo) for todo in result]
-                # Only log success AFTER the fallback actually succeeds
-                if result:
-                    log_operation_end("get-today", True, time.time() - start_time, count=len(result))
-                    return "\n\n---\n\n".join(formatted_todos)
-                else:
-                    log_operation_end("get-today", True, time.time() - start_time, count=0)
-                    return "No items due today"
-
-            except Exception as fallback_error:
-                log_operation_end("get-today", False, time.time() - start_time, error=f"Fallback failed: {fallback_error!s}")
-                return f"Error: Unable to get today's items due to a sorting issue in the Things library. Fallback also failed: {fallback_error!s}"
-        else:
-            log_operation_end("get-today", False, time.time() - start_time, error=str(e))
-            raise
+        return _format_todo_items(todos, provider)
+    except ProviderError as e:
+        log_operation_end("get-today", False, time.time() - start_time, error=str(e))
+        return _provider_error_response(e)
     except Exception as e:
         log_operation_end("get-today", False, time.time() - start_time, error=str(e))
         raise
@@ -171,13 +126,16 @@ def get_today() -> str:
 @mcp.tool(name="get_upcoming")
 def get_upcoming() -> str:
     """Get all upcoming todos (those with a start date in the future)."""
-    todos = things.upcoming(include_items=True)
+    try:
+        provider = get_provider()
+        todos = provider.upcoming(include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not todos:
         return "No upcoming items"
 
-    formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    return _format_todo_items(todos, provider)
 
 
 @mcp.tool(name="get_anytime")
@@ -412,12 +370,16 @@ def get_projects(include_items: bool = False) -> str:
     ----
         include_items: Include tasks within projects.
     """
-    projects = things.projects()
+    try:
+        provider = get_provider()
+        projects = provider.projects(include_items=include_items)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not projects:
         return "No projects found"
 
-    formatted_projects = [format_project(project, include_items) for project in projects]
+    formatted_projects = [format_project(project, include_items, get_item=provider.get, get_todos=provider.todos) for project in projects]
     return "\n\n---\n\n".join(formatted_projects)
 
 
@@ -429,12 +391,16 @@ def get_areas(include_items: bool = False) -> str:
     ----
         include_items: Include projects and tasks within areas
     """
-    areas = things.areas()
+    try:
+        provider = get_provider()
+        areas = provider.areas(include_items=include_items)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not areas:
         return "No areas found"
 
-    formatted_areas = [format_area(area, include_items) for area in areas]
+    formatted_areas = [format_area(area, include_items, get_projects=provider.projects, get_todos=provider.todos) for area in areas]
     return "\n\n---\n\n".join(formatted_areas)
 
 
@@ -449,12 +415,16 @@ def get_tags(include_items: bool = False) -> str:
     ----
         include_items: Include items tagged with each tag
     """
-    tags = things.tags()
+    try:
+        provider = get_provider()
+        tags = provider.tags(include_items=include_items)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not tags:
         return "No tags found"
 
-    formatted_tags = [format_tag(tag, include_items) for tag in tags]
+    formatted_tags = [format_tag(tag, include_items, get_todos=provider.todos) for tag in tags]
     return "\n\n---\n\n".join(formatted_tags)
 
 
@@ -486,13 +456,16 @@ def search_todos(query: str) -> str:
     ----
         query: Search term to look for in todo titles and notes
     """
-    todos = things.search(query, include_items=True)
+    try:
+        provider = get_provider()
+        todos = provider.search(query, include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not todos:
         return f"No todos found matching '{query}'"
 
-    formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    return _format_todo_items(todos, provider)
 
 
 @mcp.tool(name="search_advanced")
