@@ -102,7 +102,10 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
     server_version = "Things3MCPBridge/0.1"
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        print(f"{self.address_string()} - {format % args}", file=sys.stderr)
+        client = "unix"
+        if isinstance(self.client_address, tuple) and self.client_address:
+            client = str(self.client_address[0])
+        print(f"{client} - {format % args}", file=sys.stderr)
 
     def _authorized(self) -> bool:
         if self.path == "/health":
