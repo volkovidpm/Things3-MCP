@@ -14,27 +14,25 @@ rm -rf "${APP_DIR}"
 mkdir -p "${MACOS}" "${RESOURCES}"
 cp "${TEMPLATE}" "${CONTENTS}/Info.plist"
 
-BRIDGE_BIN="${ROOT}/.venv/bin/Things3-MCP-bridge"
-BRIDGE_PYTHON="${ROOT}/.venv/bin/python"
-if [[ -x "${BRIDGE_BIN}" ]]; then
-  cat > "${MACOS}/Things3-MCP-bridge" <<SH
-#!/usr/bin/env bash
-set -euo pipefail
-exec "${BRIDGE_BIN}" "\$@"
-SH
-elif [[ -x "${BRIDGE_PYTHON}" ]]; then
-  cat > "${MACOS}/Things3-MCP-bridge" <<SH
-#!/usr/bin/env bash
-set -euo pipefail
-exec "${BRIDGE_PYTHON}" -m things3_mcp_bridge.server "\$@"
-SH
-else
-  cat > "${MACOS}/Things3-MCP-bridge" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-exec Things3-MCP-bridge "$@"
-SH
-fi
+ENTRYPOINT="${BUILD_DIR}/bridge_entry.py"
+cat > "${ENTRYPOINT}" <<'PY'
+from things3_mcp_bridge.server import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+
+uv run --locked pyinstaller \
+  --clean \
+  --noconfirm \
+  --onefile \
+  --name Things3-MCP-bridge \
+  --distpath "${MACOS}" \
+  --workpath "${BUILD_DIR}/pyinstaller-work" \
+  --collect-submodules things \
+  --collect-submodules things3_mcp \
+  --collect-submodules things3_mcp_bridge \
+  "${ENTRYPOINT}" >/dev/null
 chmod +x "${MACOS}/Things3-MCP-bridge"
 
 echo "Built ${APP_DIR}"

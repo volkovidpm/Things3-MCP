@@ -38,7 +38,10 @@ def ensure_token(token_file: Path = DEFAULT_TOKEN_FILE) -> str:
 
 def run_worker(action: str, params: dict[str, Any] | None = None, *, timeout: float = DEFAULT_WORKER_TIMEOUT) -> dict[str, Any]:
     """Run a live DB read in a killable child process."""
-    cmd = [sys.executable, "-m", "things3_mcp_bridge.db_reader", action, "--params", json.dumps(params or {})]
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, "--worker-action", action, "--worker-params", json.dumps(params or {})]
+    else:
+        cmd = [sys.executable, "-m", "things3_mcp_bridge.db_reader", action, "--params", json.dumps(params or {})]
     try:
         completed = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)  # noqa: S603 - fixed argv, no shell
     except subprocess.TimeoutExpired:
@@ -212,7 +215,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--socket", default=str(DEFAULT_SOCKET), help="Unix socket path")
     parser.add_argument("--health", action="store_true", help="Print bridge/cache health and exit")
     parser.add_argument("--snapshot-once", action="store_true", help="Run one live Things read and update cache")
+    parser.add_argument("--worker-action", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-params", default="{}", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+
+    if args.worker_action:
+        from .db_reader import run_action
+
+        try:
+            result = run_action(args.worker_action, json.loads(args.worker_params))
+            print(json.dumps({"ok": True, "data": result}))
+            return 0
+        except Exception as exc:  # noqa: BLE001 - serialize worker failures to parent
+            print(json.dumps({"ok": False, "error_code": "things_db_unreadable", "message": str(exc)}))
+            return 1
 
     if args.health:
         return print_health()
