@@ -22,7 +22,7 @@ from .auth_status import AUTHORIZATION_HINT, build_auth_status
 from .cache import cache_status, write_snapshot
 from .protocol import error_envelope, ok_envelope
 
-DEFAULT_WORKER_TIMEOUT = float(os.environ.get("THINGS3_MCP_BRIDGE_WORKER_TIMEOUT", "8"))
+DEFAULT_WORKER_TIMEOUT = float(os.environ.get("THINGS3_MCP_BRIDGE_WORKER_TIMEOUT", "45"))
 
 
 def ensure_token(token_file: Path = DEFAULT_TOKEN_FILE) -> str:
@@ -227,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"ok": True, "data": result}))
             return 0
         except Exception as exc:  # noqa: BLE001 - serialize worker failures to parent
-            print(json.dumps({"ok": False, "error_code": "things_db_unreadable", "message": str(exc)}))
+            print(json.dumps({"ok": False, "error_code": "things_db_unreadable", "message": str(exc), "diagnostics": run_action("diagnose")}))
             return 1
 
     if args.health:

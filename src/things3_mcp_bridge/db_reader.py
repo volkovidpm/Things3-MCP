@@ -8,19 +8,73 @@ processes do not touch the protected Things group container.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
+import os
+import sqlite3
 import sys
+from pathlib import Path
 from typing import Any
 
-from things3_mcp.providers.direct import DirectThingsProvider
-
 SNAPSHOT_ACTIONS = ("inbox", "today", "upcoming", "anytime", "someday", "todos", "projects", "areas", "tags")
+
+DB_PATTERNS = (
+    "~/Library/Group Containers/JLMPQHK86H.com.culturedcode.ThingsMac/ThingsData-*/Things Database.thingsdatabase/main.sqlite",
+    "~/Library/Group Containers/JLMPQHK86H.com.culturedcode.ThingsMac/Things Database.thingsdatabase/main.sqlite",
+)
+
+
+def resolve_things_db_path() -> str:
+    """Resolve the current Things SQLite path from inside the bridge process."""
+    configured = os.environ.get("THINGSDB")
+    if configured and Path(configured).exists():
+        return configured
+    for pattern in DB_PATTERNS:
+        matches = sorted(glob.glob(os.path.expanduser(pattern)))
+        for match in matches:
+            if Path(match).exists():
+                return match
+    raise FileNotFoundError("Could not locate Things SQLite database under the Things group container")
+
+
+def diagnose_access() -> dict[str, Any]:
+    """Return local DB-path diagnostics from the bridge identity."""
+    patterns: list[dict[str, Any]] = []
+    for pattern in DB_PATTERNS:
+        expanded = os.path.expanduser(pattern)
+        matches = sorted(glob.glob(expanded))
+        patterns.append({"pattern": expanded, "matches": matches})
+    try:
+        path = resolve_things_db_path()
+        exists = Path(path).exists()
+        readable = os.access(path, os.R_OK)
+        sqlite_ok = False
+        sqlite_error = None
+        try:
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+                connection.execute("select 1").fetchone()
+                sqlite_ok = True
+        except Exception as exc:  # noqa: BLE001 - diagnostic only
+            sqlite_error = str(exc)
+        return {"ok": True, "path": path, "exists": exists, "readable": readable, "sqlite_ok": sqlite_ok, "sqlite_error": sqlite_error, "patterns": patterns}
+    except Exception as exc:  # noqa: BLE001 - diagnostic only
+        return {"ok": False, "error": str(exc), "patterns": patterns}
+
+
+def direct_provider() -> Any:
+    """Load the direct provider only after pinning THINGSDB to the resolved path."""
+    os.environ.setdefault("THINGSDB", resolve_things_db_path())
+    from things3_mcp.providers.direct import DirectThingsProvider
+
+    return DirectThingsProvider()
 
 
 def run_action(action: str, params: dict[str, Any] | None = None) -> Any:
     """Run a read action against the direct Things provider."""
     params = params or {}
-    provider = DirectThingsProvider()
+    if action == "diagnose":
+        return diagnose_access()
+    provider = direct_provider()
     if action == "snapshot":
         return {
             "inbox": provider.inbox(include_items=True),
