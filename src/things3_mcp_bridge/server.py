@@ -22,7 +22,7 @@ from .auth_status import AUTHORIZATION_HINT, build_auth_status
 from .cache import cache_status, write_snapshot
 from .protocol import error_envelope, ok_envelope
 
-DEFAULT_WORKER_TIMEOUT = float(os.environ.get("THINGS3_MCP_BRIDGE_WORKER_TIMEOUT", "45"))
+DEFAULT_WORKER_TIMEOUT = float(os.environ.get("THINGS3_MCP_BRIDGE_WORKER_TIMEOUT", "180"))
 
 
 def ensure_token(token_file: Path = DEFAULT_TOKEN_FILE) -> str:

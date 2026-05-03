@@ -2,17 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="Things3 MCP Bridge.app"
+APP_NAME="Things3 MCP Bridge"
 BUILD_DIR="${ROOT}/build/macos"
-APP_DIR="${BUILD_DIR}/${APP_NAME}"
-CONTENTS="${APP_DIR}/Contents"
-MACOS="${CONTENTS}/MacOS"
-RESOURCES="${CONTENTS}/Resources"
-TEMPLATE="${ROOT}/packaging/macos/${APP_NAME}/Contents/Info.plist.template"
+APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
 
-rm -rf "${APP_DIR}"
-mkdir -p "${MACOS}" "${RESOURCES}"
-cp "${TEMPLATE}" "${CONTENTS}/Info.plist"
+rm -rf "${APP_DIR}" "${BUILD_DIR}/pyinstaller-work"
 
 ENTRYPOINT="${BUILD_DIR}/bridge_entry.py"
 cat > "${ENTRYPOINT}" <<'PY'
@@ -25,14 +19,19 @@ PY
 uv run --locked pyinstaller \
   --clean \
   --noconfirm \
-  --onefile \
-  --name Things3-MCP-bridge \
-  --distpath "${MACOS}" \
+  --onedir \
+  --windowed \
+  --name "${APP_NAME}" \
+  --osx-bundle-identifier com.rossshannon.things3-mcp.bridge \
+  --distpath "${BUILD_DIR}" \
   --workpath "${BUILD_DIR}/pyinstaller-work" \
   --collect-submodules things \
   --collect-submodules things3_mcp \
   --collect-submodules things3_mcp_bridge \
   "${ENTRYPOINT}" >/dev/null
-chmod +x "${MACOS}/Things3-MCP-bridge"
+
+/usr/libexec/PlistBuddy -c "Add :LSBackgroundOnly bool true" "${APP_DIR}/Contents/Info.plist" 2>/dev/null || \
+  /usr/libexec/PlistBuddy -c "Set :LSBackgroundOnly true" "${APP_DIR}/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Things3 MCP Bridge" "${APP_DIR}/Contents/Info.plist"
 
 echo "Built ${APP_DIR}"
