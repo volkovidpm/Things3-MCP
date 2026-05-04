@@ -47,6 +47,9 @@ packages = ["src/things3_mcp", "src/things3_mcp_bridge"]
 include = [
     "src/things3_mcp",
     "src/things3_mcp_bridge",
+    "packaging/macos",
+    "scripts",
+    ".env.example",
     "README.md",
     "LICENSE",
     "pyproject.toml",

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -26,22 +27,38 @@ def run_codesign_summary(bundle: Path) -> str:
 
 def main() -> int:
     """Print bridge diagnostics as JSON."""
+    parser = argparse.ArgumentParser(description="Diagnose the local Things3 MCP bridge")
+    parser.add_argument(
+        "--snapshot",
+        action="store_true",
+        help="Ask the installed bridge over its socket to run a live snapshot and update the cache.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=20.0,
+        help="Client timeout in seconds for bridge requests. Default: 20.",
+    )
+    args = parser.parse_args()
+
+    code_signature = run_codesign_summary(APP_BUNDLE)
     diagnostics = {
         "bridge_running": False,
         "bundle_path": str(APP_BUNDLE),
         "bundle_exists": APP_BUNDLE.exists(),
-        "code_signature": run_codesign_summary(APP_BUNDLE),
+        "code_signature": code_signature,
+        "code_signature_is_adhoc": "Signature=adhoc" in code_signature,
         "socket_path": str(DEFAULT_SOCKET),
         "socket_reachable": False,
         "token_file": str(DEFAULT_TOKEN_FILE),
         "token_file_exists": DEFAULT_TOKEN_FILE.exists(),
         "cache": CacheStore().status(),
         "authorization_status": None,
-        "next_human_action": "If live reads fail, grant Full Disk Access to Things3 MCP Bridge.app and run Things3-MCP-bridge --snapshot-once.",
+        "next_human_action": "If live reads fail, grant Full Disk Access to Things3 MCP Bridge.app and run uv run python scripts/check_bridge.py --snapshot.",
     }
 
     if DEFAULT_SOCKET.exists() and DEFAULT_TOKEN_FILE.exists():
-        provider = BridgeThingsProvider()
+        provider = BridgeThingsProvider(timeout=args.timeout)
         try:
             diagnostics["health"] = provider.health()
             diagnostics["bridge_running"] = True
@@ -50,7 +67,18 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001 - diagnostic command
             diagnostics["health_error"] = str(exc)
 
+        if args.snapshot:
+            try:
+                diagnostics["snapshot"] = provider._request("POST", "/snapshot", json_body={})
+                diagnostics["authorization_status"] = "live snapshot succeeded through the installed bridge"
+                diagnostics["cache"] = CacheStore().status()
+            except Exception as exc:  # noqa: BLE001 - diagnostic command
+                diagnostics["snapshot_error"] = str(exc)
+                diagnostics["authorization_status"] = "live snapshot failed; check snapshot_error and macOS Full Disk Access"
+
     print(json.dumps(diagnostics, indent=2, sort_keys=True))
+    if args.snapshot and diagnostics.get("snapshot_error"):
+        return 1
     return 0
 
 

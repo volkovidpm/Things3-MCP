@@ -49,15 +49,20 @@ class AutoThingsProvider:
         self.providers = providers or _auto_provider_chain()
 
     def _call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        first_error: ProviderError | None = None
         last_error: ProviderError | None = None
         for provider in self.providers:
             try:
                 return getattr(provider, method_name)(*args, **kwargs)
             except ProviderError as exc:
+                if first_error is None:
+                    first_error = exc
                 last_error = exc
                 continue
-        if last_error:
-            raise last_error
+        if first_error:
+            if last_error and last_error is not first_error and last_error.cache_status and not first_error.cache_status:
+                first_error.cache_status = last_error.cache_status
+            raise first_error
         raise ProviderError("bridge_unavailable", "No Things provider candidates are configured")
 
     def inbox(self, include_items: bool = True) -> list[dict[str, Any]]:
@@ -87,14 +92,14 @@ class AutoThingsProvider:
     def get(self, uuid: str) -> dict[str, Any] | None:
         return self._call("get", uuid)
 
-    def projects(self, include_items: bool = False) -> list[dict[str, Any]]:
-        return self._call("projects", include_items=include_items)
+    def projects(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._call("projects", include_items=include_items, **kwargs)
 
-    def areas(self, include_items: bool = False) -> list[dict[str, Any]]:
-        return self._call("areas", include_items=include_items)
+    def areas(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._call("areas", include_items=include_items, **kwargs)
 
-    def tags(self, include_items: bool = False) -> list[dict[str, Any]]:
-        return self._call("tags", include_items=include_items)
+    def tags(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._call("tags", include_items=include_items, **kwargs)
 
 
 def _auto_provider_chain() -> list[ThingsProvider]:

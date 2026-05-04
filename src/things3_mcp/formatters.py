@@ -93,7 +93,9 @@ def format_project(project: dict, include_items: bool = False, get_item=None, ge
         project_text += f"\nNotes: {project['notes']}"
 
     if include_items:
-        todos = get_todos(project=project["uuid"])
+        todos = project.get("items")
+        if todos is None:
+            todos = get_todos(project=project["uuid"])
         if todos:
             project_text += "\n\nTasks:"
             for todo in todos:
@@ -112,13 +114,17 @@ def format_area(area: dict, include_items: bool = False, get_projects=None, get_
         area_text += f"\nNotes: {area['notes']}"
 
     if include_items:
-        projects = get_projects(area=area["uuid"])
+        projects = area.get("projects")
+        if projects is None:
+            projects = get_projects(area=area["uuid"])
         if projects:
             area_text += "\n\nProjects:"
             for project in projects:
                 area_text += f"\n- {project['title']}"
 
-        todos = get_todos(area=area["uuid"])
+        todos = area.get("items")
+        if todos is None:
+            todos = get_todos(area=area["uuid"])
         if todos:
             area_text += "\n\nTasks:"
             for todo in todos:
@@ -136,7 +142,9 @@ def format_tag(tag: dict, include_items: bool = False, get_todos=None) -> str:
         tag_text += f"\nShortcut: {tag['shortcut']}"
 
     if include_items:
-        todos = get_todos(tag=tag["title"])
+        todos = tag.get("items")
+        if todos is None:
+            todos = get_todos(tag=tag["title"])
         if todos:
             tag_text += "\n\nTagged Items:"
             for todo in todos:

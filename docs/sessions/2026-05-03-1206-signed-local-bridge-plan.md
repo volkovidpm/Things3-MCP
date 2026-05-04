@@ -386,3 +386,133 @@ Live Things access was **not verified** in this pass. I did not run `Things3-MCP
 - Run `Things3-MCP-bridge --snapshot-once` after authorization to populate `latest.json`.
 - Consider moving remaining read tools (`get_anytime`, random tools, `get_todos`, `search_items`, `search_advanced`, logbook/trash/tagged reads) onto the provider facade in a follow-up PR.
 - Consider richer cache query support for filtered `tasks()` beyond simple snapshot/search fallback.
+
+## Update — 2026-05-03 17:54 IST
+
+### Summary
+
+Clarified the distributable self-signing workflow so source users can build and authorise their own local bridge without needing an Apple Developer account. Also corrected one important TCC design flaw: SQLite path validation now happens through Python's embedded `sqlite3` inside the bridge worker instead of spawning `/usr/bin/sqlite3`, so the signed bridge remains the process touching the protected Things group container.
+
+### Changes Made
+
+- Updated `README.md` with a full "Reliable AFK Reads with the Local Bridge" setup guide:
+  - explains why transient `node`/Python/Claude/terminal binaries keep causing repeated macOS prompts
+  - documents local self-signed Code Signing certificate creation
+  - distinguishes self-signing for local source builds from Developer ID/notarisation for public binary distribution
+  - documents Full Disk Access setup and bridge verification via `scripts/check_bridge.py --snapshot`
+  - explicitly states that the current bridge covers reads/snapshots/cache only
+  - records that durable writes require a future bridge write path plus one-time Automation approval for `Things3 MCP Bridge.app -> Things3.app`
+- Updated `scripts/sign_bridge_app.sh`:
+  - added `--help`, `--identity`, and explicit `--adhoc` modes
+  - validates that the requested Code Signing identity exists before attempting to sign
+  - prints certificate creation instructions when `Things3 MCP Local` is missing
+  - verifies the resulting app signature after signing
+- Updated `scripts/install_bridge_launchagent.sh`:
+  - validates the expected bundle identifier before install
+  - warns when installing an ad-hoc signed app
+  - prints the exact Full Disk Access and verification steps after install
+- Updated `scripts/build_bridge_app.sh` to print the next signing step.
+- Updated `scripts/check_bridge.py`:
+  - added `--snapshot` for testing live access through the installed bridge socket
+  - reports `code_signature_is_adhoc`
+  - returns non-zero when `--snapshot` fails
+- Updated `pyproject.toml` so `scripts/` and `packaging/macos/` are included in source distributions.
+- Updated `src/things3_mcp_bridge/server.py` to reduce the default live worker timeout from 180s to 15s.
+- Added a regression test ensuring SQLite validation does not spawn `/usr/bin/sqlite3`.
+
+### Local Findings
+
+- `security find-identity -v -p codesigning` currently reports `0 valid identities found` on this machine, so the installed bridge remains ad-hoc signed until a local `Things3 MCP Local` certificate is created.
+- `uv run --locked python scripts/check_bridge.py --timeout 2` shows the LaunchAgent is running and socket-reachable, but `code_signature_is_adhoc` is `true` and no cache exists yet.
+- A live snapshot attempt against the currently installed ad-hoc app timed out before these changes; the installed app needs to be rebuilt/re-signed/reinstalled before re-testing live Things access.
+
+### Validation Run
+
+- `uv run --locked pytest tests/test_provider_bridge_cache.py` -> 7 passed.
+- `uv run --locked ruff check .` -> passed.
+- `uv run --locked ruff format --check .` -> passed.
+- `uv run --locked mypy src/` -> passed.
+- `bash -n scripts/build_bridge_app.sh` -> passed.
+- `bash -n scripts/sign_bridge_app.sh` -> passed.
+- `bash -n scripts/install_bridge_launchagent.sh` -> passed.
+- `bash -n scripts/uninstall_bridge_launchagent.sh` -> passed.
+- `scripts/sign_bridge_app.sh --help` -> printed the new self-signing guidance.
+- `uv run --locked python scripts/check_bridge.py --timeout 2` -> bridge reachable, installed app still ad-hoc signed, cache missing.
+
+### Next Steps
+
+- Create the local `Things3 MCP Local` Code Signing certificate in Keychain Access.
+- Rebuild, sign, and install the bridge app:
+  - `scripts/build_bridge_app.sh`
+  - `scripts/sign_bridge_app.sh --identity "Things3 MCP Local"`
+  - `scripts/install_bridge_launchagent.sh`
+- Remove/re-add `~/Applications/Things3 MCP Bridge.app` in Full Disk Access after the signed reinstall.
+- Run `uv run python scripts/check_bridge.py --snapshot` to verify live read access and populate `latest.json`.
+- Plan a follow-up phase for durable writes through the bridge if AFK write support is required.
+
+## Update — 2026-05-03 18:15 IST
+
+### Summary
+
+Created the local `Things3 MCP Local` Code Signing identity non-interactively, rebuilt the bridge app, signed it with the new identity, installed it into `~/Applications`, and restarted the LaunchAgent. The installed bridge is now self-signed rather than ad-hoc signed and is reachable over the Unix socket.
+
+### Commands / Results
+
+- `openssl req ... -subj "/CN=Things3 MCP Local"` -> generated a local self-signed Code Signing certificate/key under `tmp/`.
+- `openssl pkcs12 -legacy ...` -> generated a Keychain-compatible PKCS#12 identity.
+- `security import tmp/things3-mcp-local.p12 ...` -> imported `1 identity`.
+- `security add-trusted-cert -d -r trustRoot -p codeSign ...` -> trusted the cert for code signing.
+- `security find-identity -v -p codesigning` -> reported `1 valid identities found`, `Things3 MCP Local`.
+- `scripts/build_bridge_app.sh` -> rebuilt `build/macos/Things3 MCP Bridge.app`.
+- `scripts/sign_bridge_app.sh --identity "Things3 MCP Local"` -> signed and verified the app.
+- `scripts/install_bridge_launchagent.sh` -> installed `~/Applications/Things3 MCP Bridge.app` and restarted `com.rossshannon.things3-mcp.bridge`.
+- `codesign -dv --verbose=4 ~/Applications/Things3\ MCP\ Bridge.app` -> showed `Authority=Things3 MCP Local`, `Identifier=com.rossshannon.things3-mcp.bridge`, and no ad-hoc signature.
+- `uv run --locked python scripts/check_bridge.py --timeout 2` -> bridge running, socket reachable, `code_signature_is_adhoc=false`, cache missing.
+- `uv run --locked python scripts/check_bridge.py --snapshot --timeout 25` -> failed with `things_db_timeout` after the bridge worker's 15s timeout.
+- Opened System Settings to Full Disk Access for the required manual re-authorisation step.
+- Removed temporary exported cert/key files from `tmp/` after import.
+
+### Current Blocker
+
+macOS still needs the newly self-signed `~/Applications/Things3 MCP Bridge.app` to be removed/re-added in **System Settings -> Privacy & Security -> Full Disk Access**. This cannot be silently granted from code. Once Ross toggles that entry, rerun:
+
+```bash
+scripts/install_bridge_launchagent.sh
+uv run --locked python scripts/check_bridge.py --snapshot --timeout 25
+```
+
+## Update — 2026-05-04 01:16 IST
+
+### Summary
+
+Overnight Session 2 continued the signed bridge repair after Things MCP calls still returned `unable to open database file`. The worktree now has provider/cache coverage for more read paths, a `thingscli`-based Things data-folder resolver, stricter cache/bridge diagnostics, and test isolation for provider/cache unit tests that must not touch the live Things app or TCC-gated database.
+
+### Additional Fixes
+
+- Updated `src/things3_mcp_bridge/db_reader.py` to satisfy lint after the `thingscli` resolver work:
+  - use `capture_output=True` for the fixed-argv helper call
+  - log best-effort `thingscli defaults` failures to stderr instead of silently continuing
+  - fix FDA probe docstring formatting
+- Updated `tests/test_provider_bridge_cache.py` so resolver tests explicitly bypass real `thingscli` discovery when they intend to exercise fake globbed database paths.
+- Updated `tests/conftest.py` with `THINGS3_MCP_SKIP_THINGS_TEST_SETUP=1` so pure provider/cache tests can run without global Things app cleanup, which currently triggers Apple Events/TCC hangs.
+
+### Validation Run
+
+- `git diff --check` -> passed.
+- `uv run --locked ruff check src/things3_mcp/providers src/things3_mcp_bridge tests/test_provider_bridge_cache.py tests/conftest.py scripts/check_bridge.py` -> passed.
+- `THINGS3_MCP_SKIP_THINGS_TEST_SETUP=1 uv run --locked pytest tests/test_provider_bridge_cache.py -q --timeout=30` -> 11 passed in 11.75s.
+- `uv run --locked python scripts/check_bridge.py --timeout 2` -> bridge running, socket reachable, app bundle exists, signature is not ad-hoc, cache missing.
+- `uv run --locked python scripts/check_bridge.py --timeout 2 --snapshot` -> failed with `Bridge request failed for /snapshot: timed out`.
+- `mcporter call things.get_inbox` -> still fails with `unable to open database file`.
+
+### Current Blocker
+
+The installed bridge is reachable and self-signed, but live snapshot still times out and no cache exists. Ross likely needs to remove/re-add `~/Applications/Things3 MCP Bridge.app` in **System Settings -> Privacy & Security -> Full Disk Access**, then restart/reinstall the LaunchAgent and rerun:
+
+```bash
+cd /Users/ross/Development/Things3-MCP/.worktrees/signed-local-bridge
+scripts/install_bridge_launchagent.sh
+uv run --locked python scripts/check_bridge.py --snapshot --timeout 25
+```
+
+If that succeeds, rerun `mcporter call things.get_inbox` from the Clawdbot context.

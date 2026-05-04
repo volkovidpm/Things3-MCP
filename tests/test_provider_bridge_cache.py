@@ -9,6 +9,7 @@ import pytest
 from things3_mcp.providers import AutoThingsProvider, ProviderError, get_provider
 from things3_mcp.providers.bridge import BridgeThingsProvider
 from things3_mcp.providers.cache import CacheStore, CacheThingsProvider
+from things3_mcp_bridge import db_reader
 from things3_mcp_bridge.server import run_worker
 
 
@@ -122,6 +123,89 @@ def test_worker_timeout_returns_timeout_envelope(monkeypatch):
     envelope = run_worker("inbox", timeout=0.01)
     assert envelope["ok"] is False
     assert envelope["error_code"] == "things_db_timeout"
+
+
+def test_sqlite_probe_stays_inside_worker_process(monkeypatch, tmp_path):
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query):
+            assert query == "select 1"
+            return self
+
+        def fetchone(self):
+            return (1,)
+
+    def fail_subprocess(*_args, **_kwargs):
+        pytest.fail("SQLite validation must not spawn /usr/bin/sqlite3")
+
+    monkeypatch.setattr(db_reader.subprocess, "run", fail_subprocess)
+    monkeypatch.setattr(db_reader.sqlite3, "connect", lambda *_args, **_kwargs: FakeConnection())
+
+    assert db_reader._can_open_sqlite(tmp_path / "main.sqlite") is True
+
+
+def test_resolve_db_path_globs_group_container_when_env_unset(monkeypatch, tmp_path):
+    monkeypatch.delenv("THINGSDB", raising=False)
+    monkeypatch.delenv("THINGS3_MCP_DATA_FOLDER", raising=False)
+
+    fake_db = tmp_path / "ThingsData-FAKE" / "Things Database.thingsdatabase" / "main.sqlite"
+    fake_db.parent.mkdir(parents=True)
+    fake_db.touch()
+
+    monkeypatch.setattr(db_reader, "_data_folder_from_thingscli_defaults", lambda: None)
+    monkeypatch.setattr(db_reader.glob, "glob", lambda _pattern: [str(fake_db)])
+    monkeypatch.setattr(db_reader, "_can_open_sqlite", lambda _path: True)
+
+    assert db_reader.resolve_things_db_path() == str(fake_db)
+
+
+def test_resolve_db_path_raises_when_glob_finds_nothing(monkeypatch):
+    monkeypatch.delenv("THINGSDB", raising=False)
+    monkeypatch.delenv("THINGS3_MCP_DATA_FOLDER", raising=False)
+
+    monkeypatch.setattr(db_reader, "_data_folder_from_thingscli_defaults", lambda: None)
+    monkeypatch.setattr(db_reader.glob, "glob", lambda _pattern: [])
+
+    with pytest.raises(FileNotFoundError, match="Full Disk Access"):
+        db_reader.resolve_things_db_path()
+
+
+def test_diagnose_access_enumerates_group_container(monkeypatch, tmp_path):
+    monkeypatch.delenv("THINGSDB", raising=False)
+    monkeypatch.delenv("THINGS3_MCP_DATA_FOLDER", raising=False)
+
+    fake_db = tmp_path / "ThingsData-FAKE" / "Things Database.thingsdatabase" / "main.sqlite"
+    fake_db.parent.mkdir(parents=True)
+    fake_db.touch()
+
+    monkeypatch.setattr(db_reader, "_data_folder_from_thingscli_defaults", lambda: None)
+    monkeypatch.setattr(db_reader.glob, "glob", lambda _pattern: [str(fake_db)])
+    monkeypatch.setattr(db_reader, "_can_open_sqlite", lambda _path: True)
+
+    result = db_reader.diagnose_access()
+
+    assert result["ok"] is True
+    assert result["path"] == str(fake_db)
+    assert result["patterns"]
+    assert result["patterns"][0]["matches"] == [str(fake_db)]
+
+
+def test_snapshot_falls_back_to_apple_events_when_sqlite_path_unresolved(monkeypatch):
+    def fail_sqlite(*_args, **_kwargs):
+        raise FileNotFoundError("no db")
+
+    monkeypatch.setattr(db_reader, "run_sqlite_action", fail_sqlite)
+    monkeypatch.setattr(db_reader, "run_jxa_action", lambda action, _params: {"inbox": [{"title": action}]})
+
+    result = db_reader.run_action("snapshot")
+
+    assert result["_source"] == "apple_events"
+    assert result["inbox"][0]["title"] == "snapshot"
 
 
 def test_mcp_read_tools_use_provider_facade(monkeypatch):

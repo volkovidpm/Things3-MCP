@@ -22,12 +22,19 @@ from typing import Any
 
 SNAPSHOT_ACTIONS = ("inbox", "today", "upcoming", "anytime", "someday", "todos", "projects", "areas", "tags")
 
+DEFAULT_THINGS_BUNDLE_ID = "com.culturedcode.ThingsMac"
+CULTURED_CODE_TEAM_ID = "JLMPQHK86H"
+DEFAULT_THINGS_GROUP_CONTAINER = f"{CULTURED_CODE_TEAM_ID}.{DEFAULT_THINGS_BUNDLE_ID}"
+DATA_FOLDER_ENV = "THINGS3_MCP_DATA_FOLDER"
+THINGSCLI_ENV = "THINGS3_MCP_THINGSCLI"
+THINGSCLI_DEFAULTS_TIMEOUT_SECONDS = float(os.environ.get("THINGS3_MCP_THINGSCLI_TIMEOUT", "3"))
+
 DB_PATTERNS = (
-    "~/Library/Group Containers/JLMPQHK86H.com.culturedcode.ThingsMac/ThingsData-*/Things Database.thingsdatabase/main.sqlite",
-    "~/Library/Group Containers/JLMPQHK86H.com.culturedcode.ThingsMac/Things Database.thingsdatabase/main.sqlite",
+    f"~/Library/Group Containers/{DEFAULT_THINGS_GROUP_CONTAINER}/ThingsData-*/Things Database.thingsdatabase/main.sqlite",
+    f"~/Library/Group Containers/{DEFAULT_THINGS_GROUP_CONTAINER}/Things Database.thingsdatabase/main.sqlite",
 )
 
-JXA_TIMEOUT_SECONDS = float(os.environ.get("THINGS3_MCP_JXA_TIMEOUT", "300"))
+JXA_TIMEOUT_SECONDS = float(os.environ.get("THINGS3_MCP_JXA_TIMEOUT", "8"))
 
 # Compact one-line-JXA for simple list reads (fast list enumeration)
 _JXA_SIMPLE = r"""
@@ -74,7 +81,26 @@ function run(argv) {
     const list = app.lists().find(x=>String(v(()=>x.name(),'')).toLowerCase()===lower);
     return list ? list.toDos().map(s) : [];
   }
-  return JSON.stringify({ inbox: todosForList('Inbox'), today: todosForList('Today'), upcoming: todosForList('Upcoming'), anytime: todosForList('Anytime'), someday: todosForList('Someday') });
+  const inbox = todosForList('Inbox');
+  const today = todosForList('Today');
+  const upcoming = todosForList('Upcoming');
+  const anytime = todosForList('Anytime');
+  const someday = todosForList('Someday');
+  const seen = new Set(), todos = [];
+  for (const listTodos of [inbox, today, upcoming, anytime, someday]) {
+    for (const t of listTodos) {
+      const uuid = t.uuid;
+      if (uuid && !seen.has(uuid)) { seen.add(uuid); todos.push(t); }
+    }
+  }
+  return JSON.stringify({
+    inbox: inbox,
+    today: today,
+    upcoming: upcoming,
+    anytime: anytime,
+    someday: someday,
+    todos: todos
+  });
 }
 """
 
@@ -90,26 +116,244 @@ function run(argv) {
 """
 
 
+def _can_open_sqlite(path: Path) -> bool:
+    """Return whether ``path`` is a readable SQLite database.
+
+    Keep this check inside the worker process. Spawning ``/usr/bin/sqlite3``
+    makes the system SQLite binary the process touching the protected Things
+    group container, which can bypass the bridge app's Full Disk Access grant.
+    """
+    try:
+        uri = f"{path.expanduser().absolute().as_uri()}?mode=ro&immutable=1"
+        with sqlite3.connect(uri, uri=True, timeout=1) as connection:
+            connection.execute("select 1").fetchone()
+        return True
+    except Exception:  # noqa: BLE001 - path probing should be best-effort
+        return False
+
+
+def _valid_sqlite_path(candidate: str | Path | None) -> str | None:
+    """Normalise and validate a candidate Things SQLite path."""
+    if not candidate:
+        return None
+    path = Path(candidate).expanduser()
+    return str(path) if _can_open_sqlite(path) else None
+
+
+def _split_env_list(name: str, defaults: tuple[str, ...]) -> tuple[str, ...]:
+    """Read a comma-separated env override while preserving safe defaults."""
+    raw = os.environ.get(name)
+    if not raw:
+        return defaults
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    return values or defaults
+
+
+def _things_bundle_ids() -> tuple[str, ...]:
+    """Return Things bundle IDs to probe, overridable for beta/custom installs."""
+    return _split_env_list("THINGS3_MCP_APP_BUNDLE_IDS", (DEFAULT_THINGS_BUNDLE_ID,))
+
+
+def _things_group_containers() -> tuple[str, ...]:
+    """Return Things group-container names to probe."""
+    defaults = tuple(f"{CULTURED_CODE_TEAM_ID}.{bundle_id}" for bundle_id in _things_bundle_ids())
+    return _split_env_list("THINGS3_MCP_GROUP_CONTAINERS", defaults)
+
+
+def _db_patterns() -> tuple[str, ...]:
+    """Return Things SQLite glob patterns for all configured group containers."""
+    patterns: list[str] = []
+    for container in _things_group_containers():
+        base = f"~/Library/Group Containers/{container}"
+        patterns.extend(
+            (
+                f"{base}/ThingsData-*/Things Database.thingsdatabase/main.sqlite",
+                f"{base}/Things Database.thingsdatabase/main.sqlite",
+            )
+        )
+    return tuple(patterns)
+
+
+def _sqlite_path_for_data_folder(container: str, data_folder: str) -> Path:
+    """Build the expected SQLite path for a known Things data folder."""
+    return Path.home() / "Library/Group Containers" / container / data_folder / "Things Database.thingsdatabase/main.sqlite"
+
+
+def _validated_path_for_data_folder(data_folder: str) -> str | None:
+    """Validate a ThingsData-* folder name against configured group containers."""
+    folder = data_folder.strip().strip('"').strip("'")
+    if not folder:
+        return None
+    for container in _things_group_containers():
+        validated = _valid_sqlite_path(_sqlite_path_for_data_folder(container, folder))
+        if validated:
+            return validated
+    return None
+
+
+def _candidate_thingscli_paths() -> tuple[Path, ...]:
+    """Return likely paths for Things' bundled ``thingscli`` helper."""
+    configured = os.environ.get(THINGSCLI_ENV)
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend(
+        [
+            Path("/Applications/Things3.app/Contents/MacOS/thingscli"),
+            Path.home() / "Applications/Things3.app/Contents/MacOS/thingscli",
+        ]
+    )
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            unique.append(candidate)
+            seen.add(candidate)
+    return tuple(unique)
+
+
+def _data_folder_from_thingscli_defaults() -> str | None:
+    """Read Things' current ``ThingsData-*`` folder from its bundled CLI."""
+    for thingscli in _candidate_thingscli_paths():
+        if not thingscli.exists():
+            continue
+        try:
+            completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                [str(thingscli), "defaults"],
+                capture_output=True,
+                text=True,
+                timeout=THINGSCLI_DEFAULTS_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - resolver fallback should stay best-effort
+            print(f"thingscli defaults failed for {thingscli}: {exc}", file=sys.stderr)
+            continue
+        if completed.returncode != 0:
+            continue
+        for line in completed.stdout.splitlines():
+            key, _, value = line.partition(":")
+            if key.strip() == "THCDataFolderCurrentDataFolderPath":
+                folder = value.strip().strip(";").strip()
+                if folder.startswith("ThingsData-"):
+                    return folder
+    return None
+
+
+def _enumerate_db_patterns() -> list[str]:
+    """Glob the protected Things group container for SQLite candidates.
+
+    Only safe to call from inside the bridge worker, which holds Full Disk Access.
+    Returns the validated SQLite paths sorted lexicographically (most recent
+    ``ThingsData-*`` folders sort last; we pick the last one so a fresh data
+    folder takes precedence over a stale sibling).
+    """
+    matches: list[str] = []
+    for pattern in _db_patterns():
+        expanded = os.path.expanduser(pattern)
+        for candidate in glob.glob(expanded):
+            validated = _valid_sqlite_path(candidate)
+            if validated and validated not in matches:
+                matches.append(validated)
+    return sorted(matches)
+
+
 def resolve_things_db_path() -> str:
-    """Resolve the current Things SQLite path from inside the bridge process."""
+    """Resolve the current Things SQLite path.
+
+    Env-var hints (``THINGSDB``, ``THINGS3_MCP_DATA_FOLDER``) are honored first
+    so tests and non-default Things data layouts can override discovery. When
+    both are unset/empty, fall back to globbing the protected group container —
+    this is the bridge worker's job and the reason it holds Full Disk Access.
+    """
     configured = os.environ.get("THINGSDB")
-    if configured and Path(configured).exists():
-        return configured
-    for pattern in DB_PATTERNS:
-        matches = sorted(glob.glob(os.path.expanduser(pattern)))
-        for match in matches:
-            if Path(match).exists():
-                return match
-    raise FileNotFoundError("Could not locate Things SQLite database under the Things group container")
+    if configured:
+        validated = _valid_sqlite_path(configured)
+        if validated:
+            return validated
+        raise FileNotFoundError(f"Configured THINGSDB is not a readable SQLite database: {configured}")
+
+    configured_folder = os.environ.get(DATA_FOLDER_ENV)
+    if configured_folder:
+        validated = _validated_path_for_data_folder(configured_folder)
+        if validated:
+            return validated
+        raise FileNotFoundError(f"Configured {DATA_FOLDER_ENV} did not resolve to a readable Things SQLite database")
+
+    thingscli_folder = _data_folder_from_thingscli_defaults()
+    if thingscli_folder:
+        validated = _validated_path_for_data_folder(thingscli_folder)
+        if validated:
+            return validated
+
+    matches = _enumerate_db_patterns()
+    if matches:
+        return matches[-1]
+
+    raise FileNotFoundError(
+        "Could not find a readable Things SQLite database in the expected group container. Ensure Things 3 has been launched at least once and that the bridge bundle has Full Disk Access in System Settings."
+    )
+
+
+def _fda_probe() -> dict[str, Any]:
+    """Attempt to list a few FDA-gated directories.
+
+    This lets us tell whether the running process actually has Full Disk Access
+    attributed to it.
+    Each probe is run in its own thread with a 2-second hard cap so we can
+    distinguish "fast deny" (errno=1 EPERM) from "tccd queued the syscall"
+    (timeout — the bundle has a UI grant but tccd isn't matching it).
+    """
+    import threading
+
+    def listdir_with_timeout(path: str) -> dict[str, Any]:
+        result: dict[str, Any] = {"path": path}
+
+        def _runner() -> None:
+            try:
+                entries = sorted(os.listdir(path))
+                result["ok"] = True
+                result["count"] = len(entries)
+                result["first"] = entries[:3]
+            except OSError as exc:
+                result["ok"] = False
+                result["errno"] = exc.errno
+                result["error"] = str(exc)
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join(timeout=2.0)
+        if thread.is_alive():
+            result["ok"] = False
+            result["error"] = "syscall did not return within 2s (likely tccd-queued without prompt)"
+            result["timed_out"] = True
+        return result
+
+    return {
+        label: listdir_with_timeout(path)
+        for label, path in (
+            ("home_library_mail", os.path.expanduser("~/Library/Mail")),
+            ("home_library_messages", os.path.expanduser("~/Library/Messages")),
+            ("home_group_containers", os.path.expanduser("~/Library/Group Containers")),
+            ("things_group_container", os.path.expanduser(f"~/Library/Group Containers/{DEFAULT_THINGS_GROUP_CONTAINER}")),
+        )
+    }
 
 
 def diagnose_access() -> dict[str, Any]:
-    """Return local DB-path diagnostics from the bridge identity."""
+    """Return local DB-path diagnostics from the bridge identity.
+
+    Runs inside the worker, so it can glob the protected group container.
+    """
     patterns: list[dict[str, Any]] = []
-    for pattern in DB_PATTERNS:
+    for pattern in _db_patterns():
         expanded = os.path.expanduser(pattern)
-        matches = sorted(glob.glob(expanded))
-        patterns.append({"pattern": expanded, "matches": matches})
+        try:
+            matches = glob.glob(expanded)
+        except OSError as exc:
+            patterns.append({"pattern": expanded, "matches": None, "error": str(exc)})
+            continue
+        patterns.append({"pattern": expanded, "matches": sorted(matches)})
+    fda_probe = _fda_probe()
     try:
         path = resolve_things_db_path()
         exists = Path(path).exists()
@@ -122,14 +366,32 @@ def diagnose_access() -> dict[str, Any]:
                 sqlite_ok = True
         except Exception as exc:  # noqa: BLE001 - diagnostic only
             sqlite_error = str(exc)
-        return {"ok": True, "path": path, "exists": exists, "readable": readable, "sqlite_ok": sqlite_ok, "sqlite_error": sqlite_error, "patterns": patterns}
+        return {
+            "ok": True,
+            "path": path,
+            "exists": exists,
+            "readable": readable,
+            "sqlite_ok": sqlite_ok,
+            "sqlite_error": sqlite_error,
+            "patterns": patterns,
+            "fda_probe": fda_probe,
+            "data_folder_env": os.environ.get(DATA_FOLDER_ENV),
+            "thingsdb_env": os.environ.get("THINGSDB"),
+        }
     except Exception as exc:  # noqa: BLE001 - diagnostic only
-        return {"ok": False, "error": str(exc), "patterns": patterns}
+        return {
+            "ok": False,
+            "error": str(exc),
+            "patterns": patterns,
+            "fda_probe": fda_probe,
+            "data_folder_env": os.environ.get(DATA_FOLDER_ENV),
+            "thingsdb_env": os.environ.get("THINGSDB"),
+        }
 
 
 def direct_provider() -> Any:
     """Load the direct provider only after pinning THINGSDB to the resolved path."""
-    os.environ.setdefault("THINGSDB", resolve_things_db_path())
+    os.environ["THINGSDB"] = resolve_things_db_path()
     from things3_mcp.providers.direct import DirectThingsProvider
 
     return DirectThingsProvider()
@@ -176,13 +438,15 @@ def run_jxa_action(action: str, params: dict[str, Any] | None = None) -> Any:
         upcoming = lists_data.get("upcoming", [])
         anytime = lists_data.get("anytime", [])
         someday = lists_data.get("someday", [])
-        todos: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for item in [*inbox, *today, *upcoming, *anytime, *someday]:
-            uuid = item.get("uuid") if isinstance(item, dict) else None
-            if uuid and uuid not in seen:
-                seen.add(uuid)
-                todos.append(item)
+        todos = lists_data.get("todos")
+        if not isinstance(todos, list):
+            todos = []
+            seen: set[str] = set()
+            for item in [*inbox, *today, *upcoming, *anytime, *someday]:
+                uuid = item.get("uuid") if isinstance(item, dict) else None
+                if uuid and uuid not in seen:
+                    seen.add(uuid)
+                    todos.append(item)
         return {
             "inbox": inbox,
             "today": today,
@@ -222,9 +486,15 @@ def run_sqlite_action(action: str, params: dict[str, Any] | None = None) -> Any:
     if action in {"tasks", "todos"}:
         return getattr(provider, action)(**params)
     if action in SNAPSHOT_ACTIONS:
-        include_items = bool(params.get("include_items", True))
-        return getattr(provider, action)(include_items=include_items)
+        include_items = bool(params.pop("include_items", True))
+        return getattr(provider, action)(include_items=include_items, **params)
     raise ValueError(f"Unsupported Things bridge action: {action}")
+
+
+def _trace(stage: str, detail: str = "") -> None:
+    """Emit a worker-progress marker on stderr so the parent bridge log can show stages."""
+    suffix = f" {detail}" if detail else ""
+    print(f"[worker:{os.getpid()}] {stage}{suffix}", file=sys.stderr, flush=True)
 
 
 def run_action(action: str, params: dict[str, Any] | None = None) -> Any:
@@ -232,12 +502,19 @@ def run_action(action: str, params: dict[str, Any] | None = None) -> Any:
     params = params or {}
     if action == "diagnose":
         return diagnose_access()
+    _trace("sqlite-attempt", action)
     try:
-        return run_sqlite_action(action, params)
+        result = run_sqlite_action(action, params)
+        _trace("sqlite-ok", action)
+        return result
     except Exception as sqlite_exc:  # noqa: BLE001 - fallback path preserves both failures in diagnostics
+        _trace("sqlite-failed", repr(sqlite_exc)[:200])
+        _trace("jxa-attempt", action)
         try:
             data = run_jxa_action(action, params)
+            _trace("jxa-ok", action)
         except Exception as jxa_exc:  # noqa: BLE001
+            _trace("jxa-failed", repr(jxa_exc)[:200])
             raise RuntimeError(f"SQLite read failed ({sqlite_exc}); Apple Events read failed ({jxa_exc})") from jxa_exc
         if isinstance(data, dict):
             data.setdefault("_source", "apple_events")

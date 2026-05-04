@@ -16,7 +16,9 @@
   <string>0.1.0</string>
   <key>CFBundleVersion</key>
   <string>1</string>
-  <key>LSBackgroundOnly</key>
+  <key>LSUIElement</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Things3 MCP Bridge needs access to Things 3 in order to read your task and project data for local AI assistants.</string>
 </dict>
 </plist>

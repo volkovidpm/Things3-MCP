@@ -37,6 +37,15 @@ def _format_todo_items(items: list[dict], provider) -> str:
     return "\n\n---\n\n".join(format_todo(item, get_item=provider.get) for item in items)
 
 
+def _sample_items(items: list[dict], count: int) -> list[dict]:
+    """Return a random sample without replacement."""
+    if count <= 0:
+        return []
+    if len(items) <= count:
+        return items
+    return random.sample(items, count)  # nosec B311 - not used for cryptographic purposes
+
+
 def preprocess_array_params(**kwargs):
     """Preprocess parameters to handle MCP framework array serialization issues.
 
@@ -141,13 +150,16 @@ def get_upcoming() -> str:
 @mcp.tool(name="get_anytime")
 def get_anytime() -> str:
     """Get all todos from Anytime list. Note that this will return an extensive list of tasks. It is generally recommended to use get_todos with filters or search_todos instead."""
-    todos = things.anytime(include_items=True)
+    try:
+        provider = get_provider()
+        todos = provider.anytime(include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not todos:
         return "No items in Anytime list"
 
-    formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    return _format_todo_items(todos, provider)
 
 
 @mcp.tool(name="get_random_inbox")
@@ -164,27 +176,26 @@ def get_random_inbox(count: int = 5) -> str:
     log_operation_start("get-random-inbox")
 
     try:
-        items = things.inbox(include_items=True)
+        provider = get_provider()
+        items = provider.inbox(include_items=True)
 
         if not items:
             log_operation_end("get-random-inbox", True, time.time() - start_time, count=0)
             return "No items found in Inbox"
 
         # Sample without replacement up to the number of available items
-        if count <= 0:
-            sampled = []
-        elif len(items) <= count:
-            sampled = items
-        else:
-            sampled = random.sample(items, count)  # nosec B311 - not used for cryptographic purposes  # nosec B311 - not used for cryptographic purposes
+        sampled = _sample_items(items, count)
 
         if not sampled:
             log_operation_end("get-random-inbox", True, time.time() - start_time, count=0)
             return "No items found in Inbox"
 
-        formatted = [format_todo(item) for item in sampled]
+        formatted = [format_todo(item, get_item=provider.get) for item in sampled]
         log_operation_end("get-random-inbox", True, time.time() - start_time, count=len(sampled))
         return "\n\n---\n\n".join(formatted)
+    except ProviderError as e:
+        log_operation_end("get-random-inbox", False, time.time() - start_time, error=str(e))
+        return _provider_error_response(e)
     except Exception as e:
         log_operation_end("get-random-inbox", False, time.time() - start_time, error=str(e))
         raise
@@ -201,35 +212,36 @@ def get_random_anytime(count: int = 5) -> str:
     ----
         count: Number of random items to return. Defaults to 5.
     """
-    items = things.anytime(include_items=True)
+    try:
+        provider = get_provider()
+        items = provider.anytime(include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not items:
         return "No items in Anytime list"
 
-    if count <= 0:
-        sampled = []
-    elif len(items) <= count:
-        sampled = items
-    else:
-        sampled = random.sample(items, count)  # nosec B311 - not used for cryptographic purposes
-
+    sampled = _sample_items(items, count)
     if not sampled:
         return "No items in Anytime list"
 
-    formatted = [format_todo(item) for item in sampled]
+    formatted = [format_todo(item, get_item=provider.get) for item in sampled]
     return "\n\n---\n\n".join(formatted)
 
 
 @mcp.tool(name="get_someday")
 def get_someday() -> str:
     """Get todos from Someday list."""
-    todos = things.someday(include_items=True)
+    try:
+        provider = get_provider()
+        todos = provider.someday(include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not todos:
         return "No items in Someday list"
 
-    formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    return _format_todo_items(todos, provider)
 
 
 @mcp.tool(name="get_logbook")

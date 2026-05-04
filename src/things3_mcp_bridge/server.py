@@ -22,13 +22,15 @@ from .auth_status import AUTHORIZATION_HINT, build_auth_status
 from .cache import cache_status, write_snapshot
 from .protocol import error_envelope, ok_envelope
 
-DEFAULT_WORKER_TIMEOUT = float(os.environ.get("THINGS3_MCP_BRIDGE_WORKER_TIMEOUT", "180"))
+DEFAULT_WORKER_TIMEOUT = float(os.environ.get("THINGS3_MCP_BRIDGE_WORKER_TIMEOUT", "30"))
 
 
 def ensure_token(token_file: Path = DEFAULT_TOKEN_FILE) -> str:
     """Create/read the local bearer token, locked down to the current user."""
     token_file.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(token_file.parent, 0o700)
     if token_file.exists():
+        os.chmod(token_file, 0o600)
         return token_file.read_text().strip()
     token = secrets.token_urlsafe(32)
     token_file.write_text(token)
@@ -43,13 +45,15 @@ def run_worker(action: str, params: dict[str, Any] | None = None, *, timeout: fl
     else:
         cmd = [sys.executable, "-m", "things3_mcp_bridge.db_reader", action, "--params", json.dumps(params or {})]
     try:
-        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)  # noqa: S603 - fixed argv, no shell
+        # Capture stdout (the worker's JSON envelope) but let stderr flow through
+        # to the bridge's own stderr so worker-progress traces land in bridge.err.log.
+        completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True, timeout=timeout, check=False)  # noqa: S603 - fixed argv, no shell
     except subprocess.TimeoutExpired:
         return error_envelope("things_db_timeout", f"Things DB read worker timed out after {timeout:g}s", authorization_hint=AUTHORIZATION_HINT, cache_status=cache_status())
 
     stdout = completed.stdout.strip()
     if not stdout:
-        return error_envelope("things_db_unreadable", completed.stderr.strip() or "Things DB read worker returned no output", authorization_hint=AUTHORIZATION_HINT, cache_status=cache_status())
+        return error_envelope("things_db_unreadable", "Things DB read worker returned no output", authorization_hint=AUTHORIZATION_HINT, cache_status=cache_status())
     try:
         payload = json.loads(stdout.splitlines()[-1])
     except json.JSONDecodeError as exc:
@@ -67,7 +71,7 @@ def _cache_envelope(action: str, params: dict[str, Any] | None = None) -> dict[s
             data = provider.search(params.get("query", ""), include_items=bool(params.get("include_items", True)))
         elif action == "get":
             data = provider.get(params["uuid"])
-        elif action in {"tasks", "todos"}:
+        elif action in {"tasks", "todos", "projects", "areas", "tags"}:
             data = getattr(provider, action)(**params)
         else:
             data = getattr(provider, action)(include_items=bool(params.get("include_items", True)))
@@ -147,6 +151,10 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/cache/status":
             self._send(ok_envelope(cache_status(), source="cache"))
             return
+        if path == "/diagnose":
+            envelope = run_worker("diagnose")
+            self._send(envelope)
+            return
         if path.startswith("/things/get/"):
             self._send(live_or_cache("get", {"uuid": path.rsplit("/", 1)[-1]}))
             return
@@ -174,7 +182,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/things/search":
             self._send(live_or_cache("search", body))
             return
-        if path in {"/things/tasks", "/things/todos"}:
+        if path in {"/things/tasks", "/things/todos", "/things/projects", "/things/areas", "/things/tags"}:
             self._send(live_or_cache(path.rsplit("/", 1)[-1], body))
             return
         self._send(error_envelope("not_found", f"No bridge endpoint for {path}"), 404)

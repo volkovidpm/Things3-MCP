@@ -112,11 +112,20 @@ class BridgeThingsProvider:
         data = self._request("GET", f"/things/get/{uuid}")
         return data if isinstance(data, dict) else None
 
-    def projects(self, include_items: bool = False) -> list[dict[str, Any]]:
+    def projects(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
+        if kwargs:
+            data = self._request("POST", "/things/projects", json_body={"include_items": include_items, **kwargs})
+            return data if isinstance(data, list) else []
         return self._get_list("projects", include_items)
 
-    def areas(self, include_items: bool = False) -> list[dict[str, Any]]:
+    def areas(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
+        if kwargs:
+            data = self._request("POST", "/things/areas", json_body={"include_items": include_items, **kwargs})
+            return data if isinstance(data, list) else []
         return self._get_list("areas", include_items)
 
-    def tags(self, include_items: bool = False) -> list[dict[str, Any]]:
+    def tags(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
+        if kwargs:
+            data = self._request("POST", "/things/tags", json_body={"include_items": include_items, **kwargs})
+            return data if isinstance(data, list) else []
         return self._get_list("tags", include_items)

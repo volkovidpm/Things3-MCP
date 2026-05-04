@@ -55,24 +55,24 @@ class DirectThingsProvider:
     def get(self, uuid: str) -> dict[str, Any] | None:
         return things.get(uuid)
 
-    def projects(self, include_items: bool = False) -> list[dict[str, Any]]:
-        projects = things.projects()
+    def projects(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
+        projects = things.projects(**kwargs)
         if include_items:
             for project in projects:
-                project.setdefault("items", things.todos(project=project.get("uuid")))
+                project.setdefault("items", things.todos(project=project.get("uuid"), include_items=True))
         return projects
 
-    def areas(self, include_items: bool = False) -> list[dict[str, Any]]:
-        areas = things.areas()
+    def areas(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
+        areas = things.areas(**kwargs)
         if include_items:
             for area in areas:
                 area.setdefault("projects", things.projects(area=area.get("uuid")))
-                area.setdefault("items", things.todos(area=area.get("uuid")))
+                area.setdefault("items", things.todos(area=area.get("uuid"), include_items=True))
         return areas
 
-    def tags(self, include_items: bool = False) -> list[dict[str, Any]]:
-        tags = things.tags()
+    def tags(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
+        tags = things.tags(**kwargs)
         if include_items:
             for tag in tags:
-                tag.setdefault("items", things.todos(tag=tag.get("title")))
+                tag.setdefault("items", things.todos(tag=tag.get("title"), include_items=True))
         return tags

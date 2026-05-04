@@ -4,6 +4,10 @@
 <dict>
   <key>Label</key>
   <string>com.rossshannon.things3-mcp.bridge</string>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>com.rossshannon.things3-mcp.bridge</string>
+  </array>
   <key>ProgramArguments</key>
   <array>
     <string>__HOME__/Applications/Things3 MCP Bridge.app/Contents/MacOS/Things3 MCP Bridge</string>
@@ -20,6 +24,8 @@
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>THINGS3_MCP_DATA_FOLDER</key>
+    <string>__THINGS3_MCP_DATA_FOLDER__</string>
   </dict>
 </dict>
 </plist>
