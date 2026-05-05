@@ -511,3 +511,52 @@ but the setup section now makes the assumptions explicit:
   responsibility.
 - Separate Automation instructions for first write approval, because Full Disk
   Access only covers live reads/cache snapshots.
+
+### Update - 2026-05-05 14:10 IST: Bridge Security Trade-Off Documentation
+
+Ross clarified the product intent after the security review: the bridge should
+remain an explicit trade-off that users enter with their eyes open. It should
+not be documented as "local therefore safe" or as a blanket security
+improvement over direct access. The correct framing is:
+
+- The bridge improves reliability by giving macOS a stable local app identity
+  for Full Disk Access and Automation.
+- That concentrates trust in a per-user local service that can exercise those
+  grants through a Unix socket and bearer token.
+- Owner-only token/socket/cache permissions protect against other Unix users,
+  but they are not a sandbox boundary against unsandboxed processes running as
+  the same macOS user.
+- Self-signing is a local supply-chain trust decision, not notarisation or
+  third-party provenance.
+
+Changes made:
+
+- Added `docs/security/local-bridge-security.md` with the threat model, assets,
+  trust boundaries, self-signing side effects, main risks, mitigations, safer
+  operating modes, and "when not to enable the bridge" guidance.
+- Added a concise `README.md` "Security Model and Trade-Offs" section in the
+  bridge setup flow, linking to the detailed security note.
+- Added warnings to `scripts/sign_bridge_app.sh` and
+  `scripts/install_bridge_launchagent.sh` so the trade-off is visible during
+  signing and before granting macOS privacy access.
+
+### Update - 2026-05-05 14:22 IST: Self-Signed Bundle Mutation Caveat
+
+Ross asked the important follow-up: since the bridge is "just Python code",
+could an attacker give it Full Disk Access and then change the Python being
+executed?
+
+Clarified the nuance in the docs:
+
+- Simple post-signing edits to the app bundle should break the code signature,
+  and macOS privacy grants are tied to code identity rather than just a path.
+- The sharper risk is a same-user attacker who can use the same local signing
+  identity/private key to modify and re-sign the bundle, or who can steer the
+  signed bridge into running attacker-controlled external helpers.
+- The simpler same-user attack remains reading the bridge token and calling the
+  legitimate bridge.
+
+Updated `README.md`, `docs/security/local-bridge-security.md`,
+`scripts/sign_bridge_app.sh`, and `scripts/install_bridge_launchagent.sh` to
+call out the signing-key caveat explicitly. Added Apple code-signing references
+to the security doc.

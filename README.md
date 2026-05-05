@@ -143,6 +143,26 @@ You only need Apple Developer ID signing and notarisation if you want to distrib
 
 Ad-hoc signing (`--adhoc`) is available for development tests, but it is not recommended for the real Full Disk Access grant because each rebuild can look like a different app to macOS.
 
+### Security Model and Trade-Offs
+
+The bridge is a deliberate local capability grant. It reduces repeated macOS privacy prompts by moving Things access into one stable app identity, but that also concentrates trust in that app.
+
+Before enabling it, be clear about what changes:
+
+- Granting Full Disk Access to `Things3 MCP Bridge.app` lets the bridge read the Things database and write a JSON snapshot cache.
+- Granting Automation lets the bridge ask Things 3 to create or update tasks and projects.
+- The bridge runs as your macOS user at login through a per-user LaunchAgent.
+- The bridge accepts requests over a local Unix socket using a bearer token stored under `~/Library/Application Support/Things3-MCP/`.
+- The token, socket, cache, and logs are locked down to your Unix user, but they are not a sandbox boundary against other unsandboxed processes running as that same user.
+
+That means the bridge is appropriate when you trust this source checkout, its Python dependencies, the installed app bundle, the MCP clients and LLM workflows allowed to call this server, and the other code running as your macOS user.
+
+The bridge is **not** meant to defend against arbitrary malware, a hostile MCP client running as your user, or a malicious process that can read your home directory. Such a process may be able to read the bridge token, call the local bridge, read cached task data, or ask the bridge to create/update Things items using the bridge's macOS privacy grants.
+
+Self-signing is also a supply-chain decision. A local `Things3 MCP Local` Code Signing identity gives macOS a stable identity for this app, but it does not prove the app came from Apple or from a notarised developer. Only build and sign code you have reviewed or otherwise trust. Changing files inside the app bundle after signing should break the signature, but a same-user attacker who can use the same signing identity, replace user-writable helper paths, or otherwise influence what the signed bridge executes may still turn the authorised bridge into a route to Things data.
+
+For the detailed threat model and mitigation checklist, see [`docs/security/local-bridge-security.md`](docs/security/local-bridge-security.md).
+
 ### Build, Sign, Install
 
 Prerequisites for building the bridge from source:

@@ -68,6 +68,21 @@ setup. For reliable repeated access, sign with a local Code Signing certificate:
 EOF
 fi
 
+cat >&2 <<'EOF'
+Security trade-off:
+  This installs a per-user LaunchAgent for a local bridge service. If you grant
+  Full Disk Access, the bridge can read Things data and maintain a JSON cache. If
+  you grant Automation, it can ask Things 3 to create or update items. The socket,
+  token, cache, and logs are owner-only, but they are not a sandbox boundary
+  against other unsandboxed processes running as your macOS user. Protect the
+  local signing identity/private key; code re-signed with that same identity may
+  be treated as the same app by macOS privacy checks.
+
+  Continue only if you trust this checkout, its dependencies, the local signing
+  identity, and the MCP clients allowed to call the bridge.
+  Details: docs/security/local-bridge-security.md
+EOF
+
 if [[ -n "${DATA_FOLDER}" && ! "${DATA_FOLDER}" =~ ^ThingsData-[A-Za-z0-9_-]+$ ]]; then
   echo "Invalid THINGS3_MCP_DATA_FOLDER=${DATA_FOLDER}" >&2
   echo "Expected a folder name like ThingsData-ABC123." >&2
@@ -91,6 +106,11 @@ cat <<EOF
 
 Now grant macOS privacy access to the installed app:
   ${APP_TARGET}
+
+Security note:
+  Granting Full Disk Access and Automation is a local capability grant to the
+  bridge. It improves AFK reliability, but any same-user process that obtains
+  the bridge token may be able to use that granted access.
 
 System Settings -> Privacy & Security -> Full Disk Access:
   1. Remove any older Things3 MCP Bridge entry.

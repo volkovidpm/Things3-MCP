@@ -24,6 +24,15 @@ Development-only fallback:
 Ad-hoc signing is useful for quick tests, but each rebuild can look like a new
 app to macOS privacy controls. For reliable AFK access, use a local Code Signing
 certificate.
+
+Security trade-off:
+  Self-signing gives macOS a stable local identity for this bridge, but it is not
+  notarisation or third-party provenance. Only sign code and dependencies you
+  trust. After Full Disk Access or Automation is granted, the bridge can read
+  Things data and perform supported Things writes through a local token/socket.
+  Protect the local signing identity/private key; code re-signed with that same
+  identity may be treated as the same app by macOS privacy checks.
+  Read docs/security/local-bridge-security.md before granting privacy access.
 EOF
 }
 
@@ -87,6 +96,14 @@ Signing ad-hoc. This is only recommended for quick development testing; use a
 local Code Signing certificate before granting Full Disk Access for real use.
 EOF
 fi
+
+cat >&2 <<'EOF'
+Security reminder: signing is the first half of the bridge trust decision. The
+second half is granting macOS privacy access to the installed app. Do not grant
+Full Disk Access or Automation unless you trust this checkout, its dependencies,
+the local signing identity, and the MCP clients that will be allowed to call the
+bridge.
+EOF
 
 codesign --force --deep --sign "${IDENTITY}" "${APP}"
 codesign --verify --deep --strict --verbose=2 "${APP}"
