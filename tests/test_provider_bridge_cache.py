@@ -381,3 +381,263 @@ def test_worker_coerces_applescript_error_into_runtime_error(monkeypatch):
 
     with pytest.raises(RuntimeError, match="list not found"):
         db_reader.run_action("add_task", {"title": "x"})
+
+
+# --- Provider routing for the remaining 8 read tools ----------------------
+
+
+class _ReadProvider:
+    """Minimal stand-in capturing provider calls for fast_server tools."""
+
+    def __init__(self, *, todos_result=None, tasks_result=None, search_result=None, trash_result=None, last_result=None, get_result=None):
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+        self.todos_result = todos_result if todos_result is not None else []
+        self.tasks_result = tasks_result if tasks_result is not None else []
+        self.search_result = search_result if search_result is not None else []
+        self.trash_result = trash_result if trash_result is not None else []
+        self.last_result = last_result if last_result is not None else []
+        self.get_result = get_result
+
+    def _record(self, name, *args, **kwargs):
+        self.calls.append((name, args, kwargs))
+
+    def todos(self, **kwargs):
+        self._record("todos", **kwargs)
+        return self.todos_result
+
+    def tasks(self, **kwargs):
+        self._record("tasks", **kwargs)
+        return self.tasks_result
+
+    def search(self, query, include_items=True):
+        self._record("search", query, include_items=include_items)
+        return self.search_result
+
+    def trash(self, include_items=True):
+        self._record("trash", include_items=include_items)
+        return self.trash_result
+
+    def last(self, period, include_items=True):
+        self._record("last", period, include_items=include_items)
+        return self.last_result
+
+    def get(self, uuid):
+        self._record("get", uuid)
+        return self.get_result
+
+
+def _patch_provider(monkeypatch, provider):
+    import things3_mcp.fast_server as fast_server
+
+    monkeypatch.setattr(fast_server, "get_provider", lambda: provider)
+    return fast_server
+
+
+def test_get_logbook_calls_provider_tasks_with_completion_filter(monkeypatch):
+    provider = _ReadProvider(tasks_result=[{"title": "Done", "uuid": "1", "type": "to-do", "stop_date": "2026-05-01"}])
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_logbook(period="7d", limit=10)
+    assert "Done" in result
+    name, _args, kwargs = provider.calls[0]
+    assert name == "tasks"
+    assert kwargs.get("status") == "completed"
+    assert "stop_date" in kwargs
+
+
+def test_get_trash_calls_provider_trash(monkeypatch):
+    provider = _ReadProvider(trash_result=[{"title": "Trashed thing", "uuid": "1", "type": "to-do"}])
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_trash()
+    assert "Trashed thing" in result
+    assert provider.calls[0][0] == "trash"
+
+
+def test_get_trash_empty_returns_friendly_message(monkeypatch):
+    provider = _ReadProvider(trash_result=[])
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    assert fast_server.get_trash() == "No items in trash"
+
+
+def test_get_todos_filters_by_project_uuid(monkeypatch):
+    provider = _ReadProvider(
+        todos_result=[{"title": "In project", "uuid": "1", "type": "to-do"}],
+        get_result={"type": "project", "uuid": "PROJ", "title": "Project name"},
+    )
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_todos(project_uuid="PROJ")
+    assert "In project" in result
+    # First call resolves the project, second pulls todos.
+    assert provider.calls[0][0] == "get"
+    assert provider.calls[1][0] == "todos"
+    assert provider.calls[1][2].get("project") == "PROJ"
+
+
+def test_get_todos_rejects_invalid_project_uuid(monkeypatch):
+    provider = _ReadProvider(get_result=None)
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_todos(project_uuid="MISSING")
+    assert "Invalid project UUID" in result
+
+
+def test_get_random_todos_samples_provider_results(monkeypatch):
+    items = [{"title": f"todo-{i}", "uuid": str(i), "type": "to-do"} for i in range(50)]
+    provider = _ReadProvider(todos_result=items)
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_random_todos(count=3)
+    # Random sample of 3 → result string contains 3 separator blocks.
+    assert result.count("---") == 2
+    assert provider.calls[0][0] == "todos"
+
+
+def test_get_tagged_items_routes_through_provider_todos(monkeypatch):
+    provider = _ReadProvider(todos_result=[{"title": "Tagged", "uuid": "1", "type": "to-do"}])
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_tagged_items(tag="urgent")
+    assert "Tagged" in result
+    name, _args, kwargs = provider.calls[0]
+    assert name == "todos"
+    assert kwargs.get("tag") == "urgent"
+
+
+def test_search_advanced_passes_filters_to_provider_todos(monkeypatch):
+    provider = _ReadProvider(todos_result=[{"title": "Match", "uuid": "1", "type": "to-do"}])
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.search_advanced(status="incomplete", tag="urgent", deadline="2026-12-31")
+    assert "Match" in result
+    name, _args, kwargs = provider.calls[0]
+    assert name == "todos"
+    assert kwargs.get("status") == "incomplete"
+    assert kwargs.get("tag") == "urgent"
+    assert kwargs.get("deadline") == "2026-12-31"
+
+
+def test_search_all_items_routes_through_provider_search(monkeypatch):
+    provider = _ReadProvider(search_result=[{"title": "Found", "uuid": "1", "type": "to-do"}])
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.search_all_items(query="needle")
+    assert "Found" in result
+    name, args, _kwargs = provider.calls[0]
+    assert name == "search"
+    assert args[0] == "needle"
+
+
+def test_get_recent_routes_through_provider_last(monkeypatch):
+    provider = _ReadProvider(last_result=[{"title": "Recent", "uuid": "1", "type": "to-do"}])
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_recent(period="7d")
+    assert "Recent" in result
+    name, args, _kwargs = provider.calls[0]
+    assert name == "last"
+    assert args[0] == "7d"
+
+
+def test_get_recent_validates_period_format(monkeypatch):
+    provider = _ReadProvider()
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_recent(period="bogus")
+    assert "Error" in result
+    # Should not even reach the provider on invalid input.
+    assert provider.calls == []
+
+
+# --- New provider-protocol surface tests ----------------------------------
+
+
+def test_bridge_provider_trash_uses_get_endpoint(monkeypatch, tmp_path):
+    token = tmp_path / "bridge.token"
+    token.write_text("secret")
+    provider = BridgeThingsProvider(token_file=token, socket_path=tmp_path / "bridge.sock")
+
+    captured: dict[str, Any] = {}
+
+    class CapturingClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def request(self, method, path, json=None):
+            captured["method"] = method
+            captured["path"] = path
+            return FakeResponse({"ok": True, "data": [{"title": "trashed", "uuid": "1", "type": "to-do"}]})
+
+    monkeypatch.setattr(provider, "_client", lambda: CapturingClient())
+
+    result = provider.trash(include_items=True)
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/things/trash?include_items=true"
+    assert result[0]["title"] == "trashed"
+
+
+def test_bridge_provider_last_passes_period_in_path(monkeypatch, tmp_path):
+    token = tmp_path / "bridge.token"
+    token.write_text("secret")
+    provider = BridgeThingsProvider(token_file=token, socket_path=tmp_path / "bridge.sock")
+
+    captured: dict[str, Any] = {}
+
+    class CapturingClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def request(self, method, path, json=None):
+            captured["method"] = method
+            captured["path"] = path
+            return FakeResponse({"ok": True, "data": []})
+
+    monkeypatch.setattr(provider, "_client", lambda: CapturingClient())
+
+    provider.last("7d")
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/things/last/7d?include_items=true"
+
+
+def test_cache_provider_returns_empty_for_trash_and_last():
+    provider = CacheThingsProvider()
+    assert provider.trash() == []
+    assert provider.last("7d") == []
+
+
+def test_worker_run_action_dispatches_trash_and_last(monkeypatch):
+    """Verify run_sqlite_action routes 'trash' and 'last' to direct_provider."""
+    captured: dict[str, Any] = {}
+
+    class FakeDirectProvider:
+        def trash(self, include_items=True):
+            captured["trash_include_items"] = include_items
+            return [{"title": "T", "uuid": "1", "type": "to-do"}]
+
+        def last(self, period, include_items=True):
+            captured["last_period"] = period
+            captured["last_include_items"] = include_items
+            return [{"title": "R", "uuid": "2", "type": "to-do"}]
+
+    monkeypatch.setattr(db_reader, "direct_provider", lambda: FakeDirectProvider())
+
+    trash = db_reader.run_sqlite_action("trash", {"include_items": True})
+    last = db_reader.run_sqlite_action("last", {"period": "7d", "include_items": True})
+
+    assert trash[0]["title"] == "T"
+    assert last[0]["title"] == "R"
+    assert captured == {"trash_include_items": True, "last_period": "7d", "last_include_items": True}
+
+
+def test_worker_last_action_requires_period(monkeypatch):
+    monkeypatch.setattr(db_reader, "direct_provider", lambda: object())
+    with pytest.raises(ValueError, match="period"):
+        db_reader.run_sqlite_action("last", {})

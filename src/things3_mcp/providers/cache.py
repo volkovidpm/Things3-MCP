@@ -166,6 +166,18 @@ class CacheThingsProvider:
     def tags(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
         return self._filter_list("tags", include_items=include_items, **kwargs)
 
+    def trash(self, include_items: bool = True) -> list[dict[str, Any]]:  # noqa: ARG002
+        # The cache snapshot doesn't currently include trashed items. Return an
+        # empty list so AFK callers see no results rather than a stale snapshot.
+        return []
+
+    def last(self, period: str, include_items: bool = True) -> list[dict[str, Any]]:  # noqa: ARG002
+        # ``last(period)`` requires a creation-date scan that the snapshot
+        # doesn't materialise; surface as empty so the auto-provider chain
+        # treats the cache miss as a miss rather than a hit.
+        del period
+        return []
+
     # --- Write API ---------------------------------------------------------
     # The cache is read-only by design. Surface a clear error so AutoThings
     # write callers don't silently lose mutations into a stale snapshot.

@@ -215,9 +215,13 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/things/get/"):
             self._send(live_or_cache("get", {"uuid": path.rsplit("/", 1)[-1]}))
             return
+        if path.startswith("/things/last/"):
+            period = path.rsplit("/", 1)[-1]
+            self._send(live_or_cache("last", {"period": period, "include_items": include_items}))
+            return
         if path.startswith("/things/"):
             action = path.rsplit("/", 1)[-1]
-            if action in {"inbox", "today", "upcoming", "anytime", "someday", "projects", "areas", "tags"}:
+            if action in {"inbox", "today", "upcoming", "anytime", "someday", "projects", "areas", "tags", "trash"}:
                 self._send(live_or_cache(action, {"include_items": include_items}))
                 return
         self._send(error_envelope("not_found", f"No bridge endpoint for {path}"), 404)

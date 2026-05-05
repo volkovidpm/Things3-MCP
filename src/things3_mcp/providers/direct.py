@@ -77,6 +77,12 @@ class DirectThingsProvider:
                 tag.setdefault("items", things.todos(tag=tag.get("title"), include_items=True))
         return tags
 
+    def trash(self, include_items: bool = True) -> list[dict[str, Any]]:
+        return things.trash(include_items=include_items)
+
+    def last(self, period: str, include_items: bool = True) -> list[dict[str, Any]]:
+        return things.last(period, include_items=include_items)
+
     # --- Write API ---------------------------------------------------------
     # These delegate to the legacy applescript_bridge from inside the MCP
     # server process. They preserve historical behaviour for users who haven't

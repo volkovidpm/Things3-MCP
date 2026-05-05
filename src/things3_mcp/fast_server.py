@@ -276,24 +276,27 @@ def get_logbook(period: str = "7d", limit: int = 50) -> str:
 
         logger.debug(f"Logbook query: period={period}, start_date>={start_date}")
 
-        # Query using stop_date (completion date) instead of last (creation date)
-        # This fixes the bug where items were filtered by creation date instead of completion date
-        todos = things.tasks(status="completed", stop_date=f">={start_date}", include_items=True)
+        try:
+            provider = get_provider()
+            # stop_date filter selects by completion date — fixes the historical
+            # bug where items were filtered by creation date instead.
+            todos = provider.tasks(status="completed", stop_date=f">={start_date}", include_items=True)
+        except ProviderError as e:
+            log_operation_end("get-logbook", False, time.time() - start_time, error=str(e))
+            return _provider_error_response(e)
 
         if not todos:
             log_operation_end("get-logbook", True, time.time() - start_time, count=0)
             return "No completed items found"
 
-        # Sort by completion date, newest first
-        # Use 'or ""' to handle None values safely (prevents TypeError in Python 3)
+        # Sort by completion date, newest first; tolerate None values.
         todos.sort(key=lambda x: x.get("stop_date") or "", reverse=True)
 
         if len(todos) > limit:
             todos = todos[:limit]
 
-        formatted_todos = [format_todo(todo) for todo in todos]
         log_operation_end("get-logbook", True, time.time() - start_time, count=len(todos))
-        return "\n\n---\n\n".join(formatted_todos)
+        return _format_todo_items(todos, provider)
 
     except ValueError as e:
         log_operation_end("get-logbook", False, time.time() - start_time, error=str(e))
@@ -306,13 +309,16 @@ def get_logbook(period: str = "7d", limit: int = 50) -> str:
 @mcp.tool(name="get_trash")
 def get_trash() -> str:
     """Get trashed todos."""
-    todos = things.trash(include_items=True)
+    try:
+        provider = get_provider()
+        todos = provider.trash(include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not todos:
         return "No items in trash"
 
-    formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    return _format_todo_items(todos, provider)
 
 
 @mcp.tool(name="get_todos")
@@ -323,18 +329,21 @@ def get_todos(project_uuid: str | None = None) -> str:
     ----
         project_uuid: Optional UUID of a specific project to get todos from.
     """
-    if project_uuid:
-        project = things.get(project_uuid)
-        if not project or project.get("type") != "project":
-            return f"Error: Invalid project UUID '{project_uuid}'"
+    try:
+        provider = get_provider()
+        if project_uuid:
+            project = provider.get(project_uuid)
+            if not project or project.get("type") != "project":
+                return f"Error: Invalid project UUID '{project_uuid}'"
 
-    todos = things.todos(project=project_uuid, start=None, include_items=True)
+        todos = provider.todos(project=project_uuid, start=None, include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not todos:
         return "No todos found"
 
-    formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    return _format_todo_items(todos, provider)
 
 
 @mcp.tool(name="get_random_todos")
@@ -346,28 +355,25 @@ def get_random_todos(project_uuid: str | None = None, count: int = 5) -> str:
         project_uuid: Optional UUID of a specific project to draw todos from.
         count: Number of todos to return. Defaults to 5.
     """
-    if project_uuid:
-        project = things.get(project_uuid)
-        if not project or project.get("type") != "project":
-            return f"Error: Invalid project UUID '{project_uuid}'"
+    try:
+        provider = get_provider()
+        if project_uuid:
+            project = provider.get(project_uuid)
+            if not project or project.get("type") != "project":
+                return f"Error: Invalid project UUID '{project_uuid}'"
 
-    items = things.todos(project=project_uuid, start=None, include_items=True)
+        items = provider.todos(project=project_uuid, start=None, include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not items:
         return "No todos found"
 
-    if count <= 0:
-        sampled = []
-    elif len(items) <= count:
-        sampled = items
-    else:
-        sampled = random.sample(items, count)  # nosec B311 - not used for cryptographic purposes
-
+    sampled = _sample_items(items, count)
     if not sampled:
         return "No todos found"
 
-    formatted = [format_todo(todo) for todo in sampled]
-    return "\n\n---\n\n".join(formatted)
+    return _format_todo_items(sampled, provider)
 
 
 @mcp.tool(name="get_projects")
@@ -444,13 +450,16 @@ def get_tagged_items(tag: str) -> str:
     ----
         tag: Tag title to filter by
     """
-    todos = things.todos(tag=tag, include_items=True)
+    try:
+        provider = get_provider()
+        todos = provider.todos(tag=tag, include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
 
     if not todos:
         return f"No items found with tag '{tag}'"
 
-    formatted_todos = [format_todo(todo) for todo in todos]
-    return "\n\n---\n\n".join(formatted_todos)
+    return _format_todo_items(todos, provider)
 
 
 # SEARCH OPERATIONS
@@ -513,17 +522,19 @@ def search_advanced(
     if type:
         kwargs["type"] = type
 
-    # Execute search with applicable filters
+    # Execute search with applicable filters via the provider chain.
     try:
-        todos = things.todos(**kwargs)
-
-        if not todos:
-            return "No items found matching your search criteria"
-
-        formatted_todos = [format_todo(todo) for todo in todos]
-        return "\n\n---\n\n".join(formatted_todos)
+        provider = get_provider()
+        todos = provider.todos(**kwargs)
+    except ProviderError as e:
+        return _provider_error_response(e)
     except Exception as e:
         return f"Error in advanced search: {e!s}"
+
+    if not todos:
+        return "No items found matching your search criteria"
+
+    return _format_todo_items(todos, provider)
 
 
 # MODIFICATION OPERATIONS
@@ -909,17 +920,18 @@ def search_all_items(query: str) -> str:
         query: Search query
     """
     try:
-        # Use the Python things library for search (same as search_todos)
-        todos = things.search(query, include_items=True)
-
-        if not todos:
-            return f"No items found matching '{query}'"
-
-        formatted_todos = [format_todo(todo) for todo in todos]
-        return "\n\n---\n\n".join(formatted_todos)
+        provider = get_provider()
+        todos = provider.search(query, include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
     except Exception as e:
         logger.error(f"Error searching: {e!s}")
         return f"Error searching: {e!s}"
+
+    if not todos:
+        return f"No items found matching '{query}'"
+
+    return _format_todo_items(todos, provider)
 
 
 @mcp.tool(name="get_recent")
@@ -930,28 +942,29 @@ def get_recent(period: str) -> str:
     ----
         period: Time period (e.g., '3d', '1w', '2m', '1y')
     """
+    if not period or not any(period.endswith(unit) for unit in ["d", "w", "m", "y"]):
+        return "Error: Period must be in format '3d', '1w', '2m', '1y'"
+
     try:
-        # Check if period format is valid
-        if not period or not any(period.endswith(unit) for unit in ["d", "w", "m", "y"]):
-            return "Error: Period must be in format '3d', '1w', '2m', '1y'"
-
-        # Get recent items
-        items = things.last(period, include_items=True)
-
-        if not items:
-            return f"No items found in the last {period}"
-
-        formatted_items = []
-        for item in items:
-            if item.get("type") == "to-do":
-                formatted_items.append(format_todo(item))
-            elif item.get("type") == "project":
-                formatted_items.append(format_project(item, include_items=False))
-
-        return "\n\n---\n\n".join(formatted_items)
+        provider = get_provider()
+        items = provider.last(period, include_items=True)
+    except ProviderError as e:
+        return _provider_error_response(e)
     except Exception as e:
         logger.error(f"Error getting recent items: {e!s}")
         return f"Error getting recent items: {e!s}"
+
+    if not items:
+        return f"No items found in the last {period}"
+
+    formatted_items = []
+    for item in items:
+        if item.get("type") == "to-do":
+            formatted_items.append(format_todo(item, get_item=provider.get))
+        elif item.get("type") == "project":
+            formatted_items.append(format_project(item, include_items=False))
+
+    return "\n\n---\n\n".join(formatted_items)
 
 
 # Main entry point

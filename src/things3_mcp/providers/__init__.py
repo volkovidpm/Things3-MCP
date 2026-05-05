@@ -101,6 +101,12 @@ class AutoThingsProvider:
     def tags(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
         return self._call("tags", include_items=include_items, **kwargs)
 
+    def trash(self, include_items: bool = True) -> list[dict[str, Any]]:
+        return self._call("trash", include_items=include_items)
+
+    def last(self, period: str, include_items: bool = True) -> list[dict[str, Any]]:
+        return self._call("last", period, include_items=include_items)
+
     # --- Write API ---------------------------------------------------------
     # Writes never fall back to the cache (it can't satisfy mutations). They
     # try the bridge first, and only the direct AppleScript path as fallback

@@ -130,6 +130,13 @@ class BridgeThingsProvider:
             return data if isinstance(data, list) else []
         return self._get_list("tags", include_items)
 
+    def trash(self, include_items: bool = True) -> list[dict[str, Any]]:
+        return self._get_list("trash", include_items)
+
+    def last(self, period: str, include_items: bool = True) -> list[dict[str, Any]]:
+        data = self._request("GET", f"/things/last/{period}?include_items={str(include_items).lower()}")
+        return data if isinstance(data, list) else []
+
     # --- Write API --------------------------------------------------------
 
     def _write(self, method: str, path: str, body: dict[str, Any]) -> dict[str, Any]:

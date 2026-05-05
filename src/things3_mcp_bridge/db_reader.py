@@ -485,6 +485,13 @@ def run_sqlite_action(action: str, params: dict[str, Any] | None = None) -> Any:
         return provider.get(params["uuid"])
     if action in {"tasks", "todos"}:
         return getattr(provider, action)(**params)
+    if action == "trash":
+        return provider.trash(include_items=bool(params.get("include_items", True)))
+    if action == "last":
+        period = params.get("period")
+        if not period:
+            raise ValueError("'last' action requires a 'period' parameter (e.g. '7d', '1w')")
+        return provider.last(period, include_items=bool(params.get("include_items", True)))
     if action in SNAPSHOT_ACTIONS:
         include_items = bool(params.pop("include_items", True))
         return getattr(provider, action)(include_items=include_items, **params)
