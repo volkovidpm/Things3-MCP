@@ -161,3 +161,195 @@ matches the FDA grant, and reads succeed.
 - `packaging/macos/com.rossshannon.things3-mcp.bridge.plist.template` — AssociatedBundleIdentifiers, NO_DISCLAIM env
 - `packaging/macos/Things3 MCP Bridge.app/Contents/Info.plist.template` — LSUIElement, AE purpose string
 - `tests/test_provider_bridge_cache.py` — updated to reflect worker-glob-allowed semantics
+
+---
+
+## Update — 2026-05-05 10:41 IST: Phase B (writes) + Phase C (remaining reads)
+
+After confirming the architecture worked end-to-end for live SQLite reads, I
+extended the same pattern to writes (Phase B) and the 8 read tools that were
+still bypassing the provider (Phase C). All 18 MCP tools that talk to Things
+now route through the same `AutoThingsProvider` chain.
+
+### What shipped in Phase B
+
+**Write API on the provider:**
+- `WriteThingsProvider` protocol + `WriteUnsupportedError` in `providers/base.py`
+- `BridgeThingsProvider.add_task` / `update_task` / `add_project` / `update_project`
+  POST and PATCH over the Unix socket with the same JSON envelope as reads
+- `CacheThingsProvider` raises `WriteUnsupportedError` for any write — cache
+  cannot satisfy mutations and silent fallback would lose data
+- `DirectThingsProvider` write methods preserved as opt-in fallback when
+  `THINGS3_MCP_ALLOW_DIRECT_FALLBACK=1`. They call the existing
+  `applescript_bridge` from inside the MCP server process — same as the old
+  pre-bridge behaviour, so the fallback path is identical to historical
+  semantics
+- `AutoThingsProvider._call_write` chains bridge → optional direct, **never
+  cache**. Writes that can't reach Things must surface as errors.
+
+**Bridge HTTP write endpoints:**
+- `POST /things/todo` → `run_worker("add_task", body)`
+- `PATCH /things/todo/{uuid}` → `run_worker("update_task", body+uuid)`
+- `POST /things/project` → `run_worker("add_project", body)`
+- `PATCH /things/project/{uuid}` → `run_worker("update_project", body+uuid)`
+- New `do_PATCH` HTTP handler with auth + body parsing
+- `_run_write` helper deliberately omits cache fallback
+
+**Worker write dispatch in `db_reader.py`:**
+- `WRITE_ACTIONS = {"add_task", "update_task", "add_project", "update_project"}`
+- `run_write_action()` lazily imports `applescript_bridge` and dispatches
+- `_coerce_write_result()` normalises legacy AppleScript return values
+  (UUID strings, `"true"`, `False`, `"Error: …"` markers) into clean envelopes
+- `run_action()` recognises write actions before the SQLite/JXA branches
+- Stage tracing `[worker:PID] write-attempt {action}` → `write-ok` / `write-failed`
+
+**MCP routing:**
+- `fast_server.add_task`, `add_new_project`, `update_task`, `update_existing_project`
+  now call `get_provider().add_task(...)` etc. instead of importing
+  `applescript_bridge` directly. Removed unused imports.
+
+### What shipped in Phase C
+
+**Two new methods on `ThingsProvider`:**
+- `trash(include_items)` — wraps `things.trash()`
+- `last(period, include_items)` — wraps `things.last(period)`
+
+These were the only things-py top-level functions not already covered by the
+existing protocol; everything else fits `tasks(**kwargs)` or `todos(**kwargs)`.
+
+**New bridge endpoints:**
+- `GET /things/trash`
+- `GET /things/last/{period}` — period segment lifted from URL path
+
+**Worker dispatcher (`run_sqlite_action`)** handles `trash` and `last`
+explicitly because their kwargs shapes differ from the other read actions.
+
+**MCP routing for the 8 lifted tools:**
+- `get_logbook` → `provider.tasks(status="completed", stop_date=…)`
+- `get_trash` → `provider.trash()`
+- `get_todos` → `provider.todos(project=…)` and `provider.get(uuid)`
+- `get_random_todos` → same, plus `_sample_items`
+- `get_tagged_items` → `provider.todos(tag=…)`
+- `search_advanced` → `provider.todos(**filters)`
+- `search_all_items` → `provider.search(query)`
+- `get_recent` → `provider.last(period)`
+
+All catch `ProviderError` and route through `_provider_error_response`. All
+use `_format_todo_items(todos, provider)` for output.
+
+### New tests added
+
+| Phase | Count | Coverage |
+|---|---|---|
+| B | 9 | Bridge HTTP write client, cache refusal, auto-provider write chain, worker write dispatch, applescript-bridge return-value coercion |
+| C | 16 | All 8 lifted MCP tools route through provider, period validation, provider write/read protocol surface for `trash`/`last`, worker dispatch for `trash`/`last`, cache empty-list semantics |
+
+Total: **36 unit tests passing** (was 11).
+
+### End-to-end smoke tests done in this session
+
+All against the user's real Things database:
+
+| Operation | Endpoint | Result |
+|---|---|---|
+| Create todo | `POST /things/todo` | new UUID `Ua8DgKsHcWJGUwQrYSQcNk` |
+| Read it back | `GET /things/get/{uuid}` | SQLite returned correct title/notes |
+| Update title + notes | `PATCH /things/todo/{uuid}` | `{"ok": true}` |
+| Cancel | `PATCH /things/todo/{uuid}` `{"canceled":true}` | `{"ok": true}` |
+| List trash | `GET /things/trash` | Real trashed items returned |
+| Recent items | `GET /things/last/7d` | Real recent activity returned |
+| Live snapshot | `POST /snapshot` | 39 inbox / 27 today / 1524 anytime / 141 projects |
+
+Worker traces showed every operation flowing as `write-attempt` → `write-ok`
+or `sqlite-attempt` → `sqlite-ok`. No TCC prompts were needed for writes
+because Automation had already been granted to the bundle from earlier JXA
+testing in this session.
+
+### Updated lessons learned
+
+7. **`spctl --assess` rejection is not the same as TCC denial.** Apple DTS
+   warns that spctl is a distribution-policy check (notarization, Developer
+   ID), not the runtime trust evaluation TCC actually uses. Self-signed code
+   that spctl rejects can still pass TCC csreq matching just fine. We chased
+   this red herring for an hour before pivoting.
+
+8. **`responsibility_spawnattrs_setdisclaim` is broken on Tahoe.** A pure-C
+   reproducer (`/tmp/disclaim_test.c`) confirms `EINVAL` even with the
+   correct calling convention (`posix_spawnattr_t` by value, not by
+   pointer). The dead-end is preserved in `_disclaim.py` and gated off via
+   `THINGS3_MCP_NO_DISCLAIM=1` in the LaunchAgent plist.
+
+9. **macOS Tahoe (26+) caches per-bundle-ID launchd responsibility.** The
+   bridge was originally bootstrapped from an OpenClaw (Bun) context, which
+   stamped its responsibility chain. Killing OpenClaw and re-bootstrapping
+   was insufficient — the cache survived. Only a reboot cleared it. After
+   reboot, the bridge auto-loaded with a clean responsibility chain and has
+   stayed clean across re-installs from various shells.
+
+10. **Reboot was the actual fix, not Developer ID.** We had a strong
+    hypothesis that self-signed code couldn't get FDA on Tahoe and were
+    about to recommend $99/yr Developer ID. The empirical evidence said
+    otherwise once we cleared the responsibility cache.
+
+11. **Writes intentionally don't cache-fall-back.** `AutoThingsProvider`'s
+    write chain is `bridge → optional direct`, never cache. Silent fallback
+    to a stale cache for mutations would lose data — clear `ProviderError`
+    surfacing is correct.
+
+12. **`spctl --assess` takes 6–9 seconds because it's making a network call.**
+    Likely OCSP / CRL revocation against Apple's servers. Useful timing
+    fingerprint for diagnosing whether it's hitting the network vs failing
+    locally.
+
+### Validation in this update
+
+```
+uv run --locked pytest tests/test_provider_bridge_cache.py  → 36 passed
+uv run --locked ruff check .                                 → All checks passed!
+uv run --locked ruff format --check .                        → 31 files already formatted
+uv run --locked mypy src/                                    → no issues found in 18 source files
+pre-commit hooks (ruff/format/mypy/bandit/whitespace/eof)    → all passed
+```
+
+### Commits added in this session
+
+| Commit | Scope |
+|---|---|
+| `e4ed992` | Add bridge write API and resolve Tahoe TCC attribution |
+| `63443e8` | Route remaining 8 read tools through the bridge provider |
+
+### Final state
+
+Every TCC-protected Things operation in the MCP server now flows through
+`com.rossshannon.things3-mcp.bridge` — the single signed bundle that holds
+FDA + Automation grants. Whatever transient runtime hosts the MCP server
+(Claude Desktop, OpenClaw, terminal-launched, Codex), it inherits no
+responsibility for Things data access; the bridge does the work under its
+stable identity.
+
+| Layer | Tools | Routed through bridge |
+|---|---|---|
+| MCP read tools | 19 | 19/19 ✓ |
+| MCP write tools | 4 | 4/4 ✓ |
+| Bridge endpoints | 17 (GET + POST + PATCH) | live + cache fallback (reads only) |
+| Provider chain | bridge → cache (reads) / bridge → direct (writes) | yes |
+
+### Updated next steps (still non-blocking)
+
+1. **`Things3-MCP-bridge --authorize-once` preflight** — call
+   `AEDeterminePermissionToAutomateTarget(..., askUserIfNeeded=True)` so the
+   first-time Automation prompt happens explicitly rather than on the first
+   write attempt. Still relevant; not done.
+2. **`--doctor` subcommand** — wrap `check_bridge.py` with exact-remediation
+   strings (settings paths, `tccutil reset` commands, `launchctl bootout`
+   guidance). Still relevant; not done.
+3. **`readOnlyHint: true` MCP annotations** — auto-approval in Claude Desktop
+   for the 19 read tools. Still relevant; not done.
+4. **Decide on `_disclaim.py` long-term** — keep gated as future-proofing for
+   if Apple un-breaks the API, or strip as dead code. No action needed.
+5. **Mark integration tests with `@pytest.mark.integration`** — the ~70
+   tests that modify real Things data should be opt-in via `pytest -m
+   integration`. Currently they run by default, which we deliberately avoid.
+6. **Cleanup**: the smoke-test todo `bridge-write-smoke-test (updated, delete
+   me)` (UUID `Ua8DgKsHcWJGUwQrYSQcNk`) is marked canceled in your Things
+   logbook. Empty trash to remove permanently.
