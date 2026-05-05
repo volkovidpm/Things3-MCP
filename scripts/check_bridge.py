@@ -57,6 +57,12 @@ def main() -> int:
         "next_human_action": "If live reads fail, grant Full Disk Access to Things3 MCP Bridge.app and run uv run python scripts/check_bridge.py --snapshot.",
     }
 
+    missing_snapshot_prereqs = []
+    if not DEFAULT_SOCKET.exists():
+        missing_snapshot_prereqs.append(f"bridge socket missing at {DEFAULT_SOCKET}")
+    if not DEFAULT_TOKEN_FILE.exists():
+        missing_snapshot_prereqs.append(f"bridge token missing at {DEFAULT_TOKEN_FILE}")
+
     if DEFAULT_SOCKET.exists() and DEFAULT_TOKEN_FILE.exists():
         provider = BridgeThingsProvider(timeout=args.timeout)
         try:
@@ -75,6 +81,9 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001 - diagnostic command
                 diagnostics["snapshot_error"] = str(exc)
                 diagnostics["authorization_status"] = "live snapshot failed; check snapshot_error and macOS Full Disk Access"
+    elif args.snapshot:
+        diagnostics["snapshot_error"] = "Cannot run live snapshot: " + "; ".join(missing_snapshot_prereqs)
+        diagnostics["authorization_status"] = "live snapshot was not attempted because the installed bridge is not reachable"
 
     print(json.dumps(diagnostics, indent=2, sort_keys=True))
     if args.snapshot and diagnostics.get("snapshot_error"):

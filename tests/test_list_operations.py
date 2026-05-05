@@ -185,9 +185,10 @@ def test_get_trash():
     assert isinstance(result, str), "Should return a string"
 
     if result != "No items in trash":
-        items = result.split("\n\n---\n\n")
+        items = split_top_level_items(result)
         for item in items:
             assert verify_item_format(item), f"Item format is incorrect: {item}"
+        assert len(items) <= 50, "Trash should use the default page size"
 
 
 def test_get_random_inbox():

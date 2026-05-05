@@ -430,3 +430,84 @@ appetite for it.
 7. **Cleanup**: the smoke-test todo `bridge-write-smoke-test (updated, delete
    me)` (UUID `Ua8DgKsHcWJGUwQrYSQcNk`) is marked canceled in your Things
    logbook. Empty trash to remove permanently.
+
+### Update - 2026-05-05 12:51 IST: README Refresh and Snapshot Verification Fix
+
+Follow-up after the branch review found one documentation drift and one
+diagnostic false-positive:
+
+- `README.md` now describes the current write routing accurately: write tools
+  use the bridge first, never fall back to cache, and only use direct
+  AppleScript as the `auto` compatibility fallback when the bridge is
+  unavailable.
+- The provider-mode section now distinguishes read fallback
+  (`bridge -> cache -> optional direct`) from write fallback
+  (`bridge -> direct`).
+- The `THINGS3_MCP_DATA_FOLDER` troubleshooting text now matches the actual
+  worker behaviour: the authorised bridge worker can enumerate the Things group
+  container, but a folder hint is still useful when TCC attribution or multiple
+  data folders make discovery unreliable.
+- `scripts/check_bridge.py --snapshot` no longer exits 0 when the bridge socket
+  or token is missing. It records a `snapshot_error`, marks the live snapshot as
+  not attempted, and exits non-zero.
+- Added a unit regression test in `tests/test_provider_bridge_cache.py` for the
+  missing socket/token `--snapshot` case.
+
+### Update - 2026-05-05 13:09 IST: Direct Fallback Timeout Clarification
+
+Ross asked whether `THINGS3_MCP_ALLOW_DIRECT_FALLBACK=1` is protected by the
+same timeout boundaries as the bridge. The answer is no:
+
+- Bridge reads/writes go through the HTTP client timeout and the bridge's
+  killable worker subprocess timeout.
+- Direct read fallback still calls the legacy `things-py` path inside the MCP
+  process. That matches pre-bridge read behaviour and is not safely killable if
+  macOS TCC queues the access behind an unanswered prompt.
+- Pre-bridge AppleScript writes did have the existing `run_applescript`
+  subprocess timeout, but the direct `things-py` read calls did not.
+
+Documentation now says this explicitly in the provider-mode section.
+
+Also fixed the earlier `get_recent` formatter bypass: project items now pass
+`get_item=provider.get` into `format_project`, so a project-area lookup stays on
+the selected provider instead of falling back to raw `things.get()`.
+
+### Update - 2026-05-05 13:18 IST: Bridge Lifecycle Clarification
+
+Clarified in `README.md` that the LaunchAgent starts the bridge immediately on
+install and again at user login after reboot because the plist has `RunAtLoad`
+and `KeepAlive`. The MCP client does not lazily launch the bridge; it only
+connects to the existing socket. The long-running bridge process creates the
+token/socket and waits; protected Things access only begins when a live
+snapshot/read/diagnose/write endpoint spawns the timeout-bounded worker.
+
+### Update - 2026-05-05 13:31 IST: Trash Paging Fix
+
+OpenClaw found a live-data AFK failure: Ross's Trash has roughly 3,891 items.
+The raw bridge endpoint returned live data, but MCP `get_trash` then timed out
+while formatting and enriching the full list, fanning out into many
+`/things/get/...` calls.
+
+Fixed `get_trash` as a bounded list view:
+
+- Default `limit=50`, hard cap `MAX_TRASH_LIMIT=200`, and `offset` paging.
+- Requests `provider.trash(include_items=False)` to keep the raw payload light.
+- Formats Trash items without project/area enrichment, so a page does not
+  trigger per-item provider lookups.
+- README now documents the paging behaviour.
+
+### Update - 2026-05-05 13:45 IST: New User Bridge Setup Instructions
+
+Ross asked whether the README gives a new source user enough information to
+build, sign, install, and authorise the bridge. It already had the core flow,
+but the setup section now makes the assumptions explicit:
+
+- Prerequisites: macOS, Things 3, `uv`, and a source checkout.
+- Build output: `build/macos/Things3 MCP Bridge.app`.
+- Install behaviour: copies the signed bundle to `~/Applications`, writes the
+  LaunchAgent, and bootstraps it.
+- Warning to run the install step from a normal terminal rather than a
+  Bun-rooted Claude/OpenClaw shell because Tahoe can misattribute TCC
+  responsibility.
+- Separate Automation instructions for first write approval, because Full Disk
+  Access only covers live reads/cache snapshots.

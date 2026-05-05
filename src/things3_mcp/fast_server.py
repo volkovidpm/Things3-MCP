@@ -22,6 +22,9 @@ from .providers import ProviderError, get_provider
 setup_logging(console_level="INFO", file_level="DEBUG", structured_logs=True)
 logger = get_logger(__name__)
 
+DEFAULT_TRASH_LIMIT = 50
+MAX_TRASH_LIMIT = 200
+
 
 def _provider_error_response(error: ProviderError) -> str:
     """Render provider failures as clear MCP tool output instead of hangs."""
@@ -350,18 +353,54 @@ def get_logbook(period: str = "7d", limit: int = 50) -> str:
 
 
 @mcp.tool(name="get_trash")
-def get_trash() -> str:
-    """Get trashed todos."""
+def get_trash(limit: int = DEFAULT_TRASH_LIMIT, offset: int = 0) -> str:
+    """Get trashed todos.
+
+    Args:
+    ----
+        limit: Maximum number of trashed items to return. Defaults to 50 and is capped at 200.
+        offset: Zero-based offset for paging through large Trash lists.
+    """
+    try:
+        limit = int(limit)
+        offset = int(offset)
+    except (TypeError, ValueError):
+        return "Error: limit and offset must be integers"
+
+    if limit < 1:
+        return "Error: limit must be at least 1"
+    if offset < 0:
+        return "Error: offset must be at least 0"
+
+    requested_limit = limit
+    limit = min(limit, MAX_TRASH_LIMIT)
+
     try:
         provider = get_provider()
-        todos = provider.trash(include_items=True)
+        # Trash can be huge. Pull the lightweight shape and avoid formatter
+        # relation lookups, otherwise one MCP call can fan out into thousands
+        # of /things/get requests.
+        todos = provider.trash(include_items=False)
     except ProviderError as e:
         return _provider_error_response(e)
 
     if not todos:
         return "No items in trash"
 
-    return _format_todo_items(todos, provider)
+    total = len(todos)
+    if offset >= total:
+        return f"No trash items at offset {offset}. Trash contains {total} items."
+
+    page = todos[offset : offset + limit]
+    formatted = [format_todo(todo, get_item=lambda _uuid: None) for todo in page]
+    start = offset + 1
+    end = offset + len(page)
+    footer_parts = [f"Showing trashed items {start}-{end} of {total}."]
+    if requested_limit > MAX_TRASH_LIMIT:
+        footer_parts.append(f"Requested limit {requested_limit} was capped at {MAX_TRASH_LIMIT}.")
+    if end < total:
+        footer_parts.append(f"Next page: call get_trash(limit={limit}, offset={end}).")
+    return "\n\n---\n\n".join(formatted) + "\n\n" + " ".join(footer_parts)
 
 
 @mcp.tool(name="get_todos")
@@ -989,7 +1028,7 @@ def get_recent(period: str) -> str:
         if item.get("type") == "to-do":
             formatted_items.append(format_todo(item, get_item=provider.get))
         elif item.get("type") == "project":
-            formatted_items.append(format_project(item, include_items=False))
+            formatted_items.append(format_project(item, include_items=False, get_item=provider.get, get_todos=provider.todos))
 
     return "\n\n---\n\n".join(formatted_items)
 

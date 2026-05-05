@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
+import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -123,6 +126,34 @@ def test_worker_timeout_returns_timeout_envelope(monkeypatch):
     envelope = run_worker("inbox", timeout=0.01)
     assert envelope["ok"] is False
     assert envelope["error_code"] == "things_db_timeout"
+
+
+def test_check_bridge_snapshot_fails_when_bridge_prerequisites_are_missing(monkeypatch, tmp_path, capsys):
+    """``check_bridge.py --snapshot`` must not exit 0 when no bridge is reachable."""
+    script_path = Path(__file__).parents[1] / "scripts" / "check_bridge.py"
+    spec = importlib.util.spec_from_file_location("check_bridge_under_test", script_path)
+    assert spec and spec.loader
+    check_bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(check_bridge)
+
+    class FakeCacheStore:
+        def status(self):
+            return {"available": False}
+
+    monkeypatch.setattr(check_bridge, "DEFAULT_SOCKET", tmp_path / "missing.sock")
+    monkeypatch.setattr(check_bridge, "DEFAULT_TOKEN_FILE", tmp_path / "missing.token")
+    monkeypatch.setattr(check_bridge, "APP_BUNDLE", tmp_path / "Things3 MCP Bridge.app")
+    monkeypatch.setattr(check_bridge, "CacheStore", FakeCacheStore)
+    monkeypatch.setattr(sys, "argv", ["check_bridge.py", "--snapshot"])
+
+    exit_code = check_bridge.main()
+    diagnostics = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert diagnostics["socket_reachable"] is False
+    assert diagnostics["snapshot_error"].startswith("Cannot run live snapshot")
+    assert "bridge socket missing" in diagnostics["snapshot_error"]
+    assert "bridge token missing" in diagnostics["snapshot_error"]
 
 
 def test_sqlite_probe_stays_inside_worker_process(monkeypatch, tmp_path):
@@ -618,6 +649,46 @@ def test_get_trash_calls_provider_trash(monkeypatch):
     result = fast_server.get_trash()
     assert "Trashed thing" in result
     assert provider.calls[0][0] == "trash"
+    assert provider.calls[0][2]["include_items"] is False
+
+
+def test_get_trash_limits_large_trash_without_per_item_enrichment(monkeypatch):
+    items = [{"title": f"Trash {i}", "uuid": str(i), "type": "to-do", "project": "project-1"} for i in range(300)]
+    provider = _ReadProvider(trash_result=items, get_result={"title": "Should not be fetched", "uuid": "project-1", "type": "project"})
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_trash()
+
+    assert "Trash 0" in result
+    assert "Trash 49" in result
+    assert "Trash 50" not in result
+    assert "Showing trashed items 1-50 of 300" in result
+    assert "Next page: call get_trash(limit=50, offset=50)" in result
+    assert [call[0] for call in provider.calls] == ["trash"]
+
+
+def test_get_trash_supports_offset_and_caps_limit(monkeypatch):
+    items = [{"title": f"Trash {i}", "uuid": str(i), "type": "to-do"} for i in range(300)]
+    provider = _ReadProvider(trash_result=items)
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_trash(limit=250, offset=100)
+
+    assert "Trash 100" in result
+    assert "Trash 299" in result
+    assert "Trash 99" not in result
+    assert "Requested limit 250 was capped at 200" in result
+    assert "Next page" not in result
+
+
+def test_get_trash_rejects_invalid_paging(monkeypatch):
+    provider = _ReadProvider()
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    assert fast_server.get_trash(limit=0) == "Error: limit must be at least 1"
+    assert fast_server.get_trash(offset=-1) == "Error: offset must be at least 0"
+    assert fast_server.get_trash(limit="many") == "Error: limit and offset must be integers"
+    assert provider.calls == []
 
 
 def test_get_trash_empty_returns_friendly_message(monkeypatch):
@@ -705,6 +776,21 @@ def test_get_recent_routes_through_provider_last(monkeypatch):
     name, args, _kwargs = provider.calls[0]
     assert name == "last"
     assert args[0] == "7d"
+
+
+def test_get_recent_project_area_lookup_stays_on_provider(monkeypatch):
+    provider = _ReadProvider(
+        last_result=[{"title": "Recent Project", "uuid": "project-1", "type": "project", "area": "area-1"}],
+        get_result={"title": "Bridge Area", "uuid": "area-1", "type": "area"},
+    )
+    fast_server = _patch_provider(monkeypatch, provider)
+
+    result = fast_server.get_recent(period="7d")
+
+    assert "Recent Project" in result
+    assert "Area: Bridge Area" in result
+    assert provider.calls[0][0] == "last"
+    assert provider.calls[1] == ("get", ("area-1",), {})
 
 
 def test_get_recent_validates_period_format(monkeypatch):
