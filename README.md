@@ -29,6 +29,14 @@ This MCP server unlocks the power of AI for your task management:
 - Support for nested data (projects within areas, todos within projects)
 - Checklist/Subtask support - Read and display existing checklist items from todos
 
+## Data Safety: Things SQLite is Read-Only
+
+This server **never writes to Things' SQLite database directly**. Doing so would bypass Things' sync engine and risk corruption or loss across iCloud-synced devices.
+
+- All SQLite reads use `sqlite3.connect("file:…?mode=ro&immutable=1", uri=True)` — kernel-enforced read-only handle.
+- Reads go through the [`things-py`](https://github.com/thingsapi/things.py) library, which has no write API by design.
+- All mutations (create / update / complete / cancel / move) flow through AppleScript via `tell application "Things3"`, so Things 3 owns its database and handles sync.
+
 ## Installation
 
 #### Prerequisites
