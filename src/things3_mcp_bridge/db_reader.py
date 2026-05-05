@@ -497,11 +497,87 @@ def _trace(stage: str, detail: str = "") -> None:
     print(f"[worker:{os.getpid()}] {stage}{suffix}", file=sys.stderr, flush=True)
 
 
+WRITE_ACTIONS = {"add_task", "update_task", "add_project", "update_project"}
+
+# Marker prefixes that applescript_bridge functions return when an operation
+# fails. Match the pattern used by the existing MCP server in fast_server.py.
+_ERROR_MARKERS = ("error:", "applescript error", "⚠️", "failed", "exception")
+
+
+def _coerce_write_result(result: Any, op_desc: str) -> dict[str, Any]:
+    """Normalize an applescript_bridge return value into a worker envelope.
+
+    The legacy AppleScript helpers return either:
+      - ``True``/``"true"`` for success without a UUID (e.g. updates)
+      - a UUID string (e.g. add_todo)
+      - ``False`` or an "Error: …" string on failure
+
+    We surface the UUID when present so the bridge HTTP response can include it,
+    and raise :class:`RuntimeError` for failures so the parent worker emits a
+    clean error envelope.
+    """
+    if isinstance(result, bool):
+        if result:
+            return {"ok": True}
+        raise RuntimeError(f"AppleScript reported failure on {op_desc}")
+    if isinstance(result, str):
+        stripped = result.strip()
+        lowered = stripped.lower()
+        if lowered == "true":
+            return {"ok": True}
+        if any(marker in lowered for marker in _ERROR_MARKERS):
+            raise RuntimeError(f"AppleScript error on {op_desc}: {stripped}")
+        # Looks like a UUID or other success identifier.
+        return {"ok": True, "id": stripped}
+    raise RuntimeError(f"Unexpected AppleScript result type on {op_desc}: {type(result).__name__}")
+
+
+def run_write_action(action: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Dispatch a write action to applescript_bridge from inside the worker.
+
+    Importing applescript_bridge lazily keeps the read path free of its
+    transitive dependencies (date_converter, etc.) and lets unit tests mock it
+    cleanly without import-time side effects.
+    """
+    from things3_mcp import applescript_bridge as ab
+
+    if action == "add_task":
+        return _coerce_write_result(ab.add_todo(**params), "create todo")
+    if action == "update_task":
+        uuid = params.pop("uuid", None)
+        if not uuid:
+            raise ValueError("update_task requires 'uuid' in params")
+        return _coerce_write_result(ab.update_todo(id=uuid, **params), f"update todo {uuid}")
+    if action == "add_project":
+        return _coerce_write_result(ab.add_project(**params), "create project")
+    if action == "update_project":
+        uuid = params.pop("uuid", None)
+        if not uuid:
+            raise ValueError("update_project requires 'uuid' in params")
+        return _coerce_write_result(ab.update_project(id=uuid, **params), f"update project {uuid}")
+    raise ValueError(f"Unsupported write action: {action}")
+
+
 def run_action(action: str, params: dict[str, Any] | None = None) -> Any:
-    """Run a read action against Things, preferring SQLite and falling back to Apple Events."""
+    """Run a read or write action against Things.
+
+    Reads prefer SQLite and fall back to Apple Events. Writes go straight to
+    AppleScript — there is no SQLite write path (the DB is opened read-only by
+    design) and Things has no other public mutation API beyond AppleScript /
+    URL scheme.
+    """
     params = params or {}
     if action == "diagnose":
         return diagnose_access()
+    if action in WRITE_ACTIONS:
+        _trace("write-attempt", action)
+        try:
+            result = run_write_action(action, params)
+            _trace("write-ok", action)
+            return result
+        except Exception as exc:
+            _trace("write-failed", repr(exc)[:200])
+            raise
     _trace("sqlite-attempt", action)
     try:
         result = run_sqlite_action(action, params)

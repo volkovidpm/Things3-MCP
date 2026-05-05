@@ -26,6 +26,12 @@
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>THINGS3_MCP_DATA_FOLDER</key>
     <string>__THINGS3_MCP_DATA_FOLDER__</string>
+    <!-- responsibility_spawnattrs_setdisclaim returns EINVAL on macOS 26 Tahoe.
+         Until Apple fixes it (or we find an alternative), force the worker spawn
+         to use plain subprocess.run, which works correctly when the bridge is
+         bootstrapped from a clean (non-Bun-rooted) shell. -->
+    <key>THINGS3_MCP_NO_DISCLAIM</key>
+    <string>1</string>
   </dict>
 </dict>
 </plist>

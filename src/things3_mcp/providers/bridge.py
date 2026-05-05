@@ -129,3 +129,21 @@ class BridgeThingsProvider:
             data = self._request("POST", "/things/tags", json_body={"include_items": include_items, **kwargs})
             return data if isinstance(data, list) else []
         return self._get_list("tags", include_items)
+
+    # --- Write API --------------------------------------------------------
+
+    def _write(self, method: str, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        data = self._request(method, path, json_body=body)
+        return data if isinstance(data, dict) else {}
+
+    def add_task(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._write("POST", "/things/todo", params)
+
+    def update_task(self, uuid: str, params: dict[str, Any]) -> dict[str, Any]:
+        return self._write("PATCH", f"/things/todo/{uuid}", params)
+
+    def add_project(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._write("POST", "/things/project", params)
+
+    def update_project(self, uuid: str, params: dict[str, Any]) -> dict[str, Any]:
+        return self._write("PATCH", f"/things/project/{uuid}", params)

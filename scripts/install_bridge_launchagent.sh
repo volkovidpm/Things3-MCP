@@ -14,6 +14,43 @@ if [[ ! -d "${APP_SOURCE}" ]]; then
   exit 1
 fi
 
+# Detect Bun-rooted shells. macOS 26 Tahoe's TCC attributes the bridge's
+# responsibility to whichever process spawns the launchctl bootstrap call.
+# If that's a Bun runtime (OpenClaw, Claude Desktop, Claude Code), the bridge
+# inherits Bun as its responsible code; tccd then asks "does Bun have FDA?"
+# instead of "does the bridge have FDA?", and silently denies. Refuse to
+# install from such a context — the user must run from Terminal.app, Warp,
+# iTerm, or any non-Bun shell. Set THINGS3_MCP_INSTALL_FORCE=1 to override.
+detect_bun_in_chain() {
+  local pid="$1"
+  while [[ "${pid}" -gt 1 ]]; do
+    local cmd
+    cmd="$(ps -o command= -p "${pid}" 2>/dev/null || true)"
+    if [[ "${cmd}" == *"/bun"* || "${cmd}" == *" bun "* ]]; then
+      return 0
+    fi
+    pid="$(ps -o ppid= -p "${pid}" 2>/dev/null | tr -d ' ' || true)"
+    [[ -z "${pid}" ]] && break
+  done
+  return 1
+}
+if [[ -z "${THINGS3_MCP_INSTALL_FORCE:-}" ]] && detect_bun_in_chain "$$"; then
+  cat >&2 <<'EOF'
+Refusing to install: this shell's process tree contains a Bun runtime.
+
+macOS 26 Tahoe's TCC attributes the bridge's responsible process to whatever
+launches the launchctl bootstrap call. If that's Bun (OpenClaw, Claude Desktop,
+Claude Code), the bridge inherits Bun as its responsible code and TCC silently
+denies access to your Things database — even if the bundle is granted Full Disk
+Access in System Settings.
+
+Open Terminal.app, Warp, or iTerm directly (Cmd+Space -> "Terminal" -> Enter)
+and re-run this script from there. To bypass this check anyway, set
+THINGS3_MCP_INSTALL_FORCE=1.
+EOF
+  exit 2
+fi
+
 SIGNATURE="$(codesign -dv "${APP_SOURCE}" 2>&1 || true)"
 if ! grep -Fq "Identifier=com.rossshannon.things3-mcp.bridge" <<<"${SIGNATURE}"; then
   echo "The bridge app is not signed with the expected bundle identifier." >&2
@@ -44,8 +81,8 @@ sed \
   -e "s#__HOME__#${HOME}#g" \
   -e "s#__THINGS3_MCP_DATA_FOLDER__#${DATA_FOLDER}#g" \
   "${PLIST_TEMPLATE}" > "${PLIST_TARGET}"
-launchctl unload "${PLIST_TARGET}" >/dev/null 2>&1 || true
-launchctl load "${PLIST_TARGET}"
+launchctl bootout "gui/$(id -u)/com.rossshannon.things3-mcp.bridge" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/$(id -u)" "${PLIST_TARGET}"
 echo "Installed LaunchAgent at ${PLIST_TARGET}"
 if [[ -n "${DATA_FOLDER}" ]]; then
   echo "Configured LaunchAgent THINGS3_MCP_DATA_FOLDER=${DATA_FOLDER}"

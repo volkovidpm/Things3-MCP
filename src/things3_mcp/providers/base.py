@@ -46,7 +46,7 @@ class ProviderError(RuntimeError):
 
 
 class ThingsProvider(Protocol):
-    """Read-only facade used by the MCP server."""
+    """Read facade used by the MCP server."""
 
     def inbox(self, include_items: bool = True) -> list[dict[str, Any]]: ...
     def today(self, include_items: bool = True) -> list[dict[str, Any]]: ...
@@ -60,3 +60,35 @@ class ThingsProvider(Protocol):
     def projects(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]: ...
     def areas(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]: ...
     def tags(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]: ...
+
+
+class WriteThingsProvider(Protocol):
+    """Write facade used by the MCP server.
+
+    Separate from the read protocol so providers like cache and direct can opt
+    out: the cache provider has no way to persist writes durably, and the
+    direct provider's writes still go through the MCP-server-process AppleScript
+    path (which has the original transient-runtime TCC issues we built the
+    bridge to solve). Use ``WriteUnsupported`` for providers that cannot satisfy
+    a write request — auto-providers should fail-fast on writes rather than
+    silently downgrade to a stale cache.
+    """
+
+    def add_task(self, params: dict[str, Any]) -> dict[str, Any]: ...
+    def update_task(self, uuid: str, params: dict[str, Any]) -> dict[str, Any]: ...
+    def add_project(self, params: dict[str, Any]) -> dict[str, Any]: ...
+    def update_project(self, uuid: str, params: dict[str, Any]) -> dict[str, Any]: ...
+
+
+class WriteUnsupportedError(ProviderError):
+    """Raised by providers that cannot satisfy write requests (e.g. cache)."""
+
+    def __init__(self, provider_name: str, operation: str) -> None:
+        super().__init__(
+            "writes_unsupported",
+            f"Provider '{provider_name}' cannot satisfy write operation '{operation}'. Writes require a live bridge or direct AppleScript path.",
+        )
+
+
+# Backwards-compatible alias for callers that imported the older name.
+WriteUnsupported = WriteUnsupportedError

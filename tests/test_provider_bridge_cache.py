@@ -229,3 +229,155 @@ def test_mcp_read_tools_use_provider_facade(monkeypatch):
     assert "Inbox via facade" in fast_server.get_inbox()
     assert fast_server.get_today() == "No items due today"
     assert "Search alpha" in fast_server.search_todos("alpha")
+
+
+# --- Write path tests -----------------------------------------------------
+
+
+def test_bridge_provider_add_task_posts_correct_payload(monkeypatch, tmp_path):
+    """The HTTP client should POST to /things/todo with the params as JSON body."""
+    token = tmp_path / "bridge.token"
+    token.write_text("secret")
+    provider = BridgeThingsProvider(token_file=token, socket_path=tmp_path / "bridge.sock")
+
+    captured: dict[str, Any] = {}
+
+    class CapturingClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def request(self, method, path, json=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return FakeResponse({"ok": True, "data": {"id": "new-uuid"}})
+
+    monkeypatch.setattr(provider, "_client", lambda: CapturingClient())
+
+    result = provider.add_task({"title": "Hello", "tags": ["a"]})
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/things/todo"
+    assert captured["json"] == {"title": "Hello", "tags": ["a"]}
+    assert result == {"id": "new-uuid"}
+
+
+def test_bridge_provider_update_task_uses_patch(monkeypatch, tmp_path):
+    token = tmp_path / "bridge.token"
+    token.write_text("secret")
+    provider = BridgeThingsProvider(token_file=token, socket_path=tmp_path / "bridge.sock")
+
+    captured: dict[str, Any] = {}
+
+    class CapturingClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def request(self, method, path, json=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return FakeResponse({"ok": True, "data": {}})
+
+    monkeypatch.setattr(provider, "_client", lambda: CapturingClient())
+
+    provider.update_task("ABC123", {"title": "Updated"})
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/things/todo/ABC123"
+    assert captured["json"] == {"title": "Updated"}
+
+
+def test_cache_provider_refuses_writes():
+    provider = CacheThingsProvider()
+    with pytest.raises(ProviderError) as exc:
+        provider.add_task({"title": "x"})
+    assert exc.value.error_code == "writes_unsupported"
+
+
+def test_auto_provider_writes_skip_cache_and_use_bridge_only():
+    """Writes must never silently fall back to the cache."""
+
+    class FakeBridge(BridgeThingsProvider):
+        def __init__(self):
+            self.add_task_called_with: dict[str, Any] | None = None
+
+        def add_task(self, params):
+            self.add_task_called_with = params
+            return {"ok": True, "id": "from-bridge"}
+
+    bridge = FakeBridge()
+    cache = CacheThingsProvider()
+    auto = AutoThingsProvider(providers=[bridge, cache])
+
+    result = auto.add_task({"title": "test"})
+    assert result == {"ok": True, "id": "from-bridge"}
+    assert bridge.add_task_called_with == {"title": "test"}
+
+
+def test_auto_provider_writes_surface_bridge_error_when_no_fallback(monkeypatch):
+    """Without ALLOW_DIRECT_FALLBACK, a bridge failure on writes propagates."""
+    monkeypatch.delenv("THINGS3_MCP_ALLOW_DIRECT_FALLBACK", raising=False)
+
+    class FailingBridge(BridgeThingsProvider):
+        def __init__(self):
+            pass
+
+        def add_task(self, _params):
+            raise ProviderError("bridge_unavailable", "socket gone")
+
+    auto = AutoThingsProvider(providers=[FailingBridge(), CacheThingsProvider()])
+    with pytest.raises(ProviderError) as exc:
+        auto.add_task({"title": "x"})
+    assert exc.value.error_code == "bridge_unavailable"
+
+
+def test_worker_run_action_dispatches_add_task_to_applescript(monkeypatch):
+    """run_action('add_task', params) should call applescript_bridge.add_todo."""
+    import things3_mcp.applescript_bridge as ab
+
+    captured: dict[str, Any] = {}
+
+    def fake_add_todo(**kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "new-uuid-1234"
+
+    monkeypatch.setattr(ab, "add_todo", fake_add_todo)
+
+    result = db_reader.run_action("add_task", {"title": "Hello", "notes": "world"})
+    assert captured == {"title": "Hello", "notes": "world"}
+    assert result == {"ok": True, "id": "new-uuid-1234"}
+
+
+def test_worker_run_action_update_task_extracts_uuid(monkeypatch):
+    import things3_mcp.applescript_bridge as ab
+
+    captured: dict[str, Any] = {}
+
+    def fake_update_todo(**kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "true"
+
+    monkeypatch.setattr(ab, "update_todo", fake_update_todo)
+
+    result = db_reader.run_action("update_task", {"uuid": "ABC123", "title": "new"})
+    assert captured == {"id": "ABC123", "title": "new"}
+    assert result == {"ok": True}
+
+
+def test_worker_run_action_update_task_requires_uuid():
+    with pytest.raises(ValueError, match="uuid"):
+        db_reader.run_action("update_task", {"title": "no uuid"})
+
+
+def test_worker_coerces_applescript_error_into_runtime_error(monkeypatch):
+    import things3_mcp.applescript_bridge as ab
+
+    monkeypatch.setattr(ab, "add_todo", lambda **_kwargs: "Error: list not found")
+
+    with pytest.raises(RuntimeError, match="list not found"):
+        db_reader.run_action("add_task", {"title": "x"})

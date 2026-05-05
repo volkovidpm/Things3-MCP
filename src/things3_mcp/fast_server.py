@@ -8,11 +8,7 @@ import things
 from mcp.server.fastmcp import FastMCP
 
 from .applescript_bridge import (
-    add_project,
-    add_todo,
     ensure_things_ready,
-    update_project,
-    update_todo,
 )
 from .formatters import format_area, format_project, format_tag, format_todo
 from .logging_config import (
@@ -581,23 +577,20 @@ def add_task(
         if isinstance(notes, str):
             notes = notes.replace("+", " ").replace("%20", " ")
 
-        # Use the direct AppleScript approach which is more reliable
-        logger.info(f"Creating todo using AppleScript: {title}")
+        logger.info(f"Creating todo through provider: {title}")
 
         try:
-            task_id = add_todo(title=title, notes=notes, when=when, deadline=deadline, tags=tags, list_id=list_id, list_title=list_title)
-        except Exception as bridge_error:
-            logger.error(f"AppleScript bridge error: {bridge_error}")
-            return f"⚠️ AppleScript bridge error: {bridge_error}"
+            params = {"title": title, "notes": notes, "when": when, "deadline": deadline, "tags": tags, "list_id": list_id, "list_title": list_title}
+            # Drop None values so the provider doesn't pass them as kwargs to applescript_bridge.
+            params = {k: v for k, v in params.items() if v is not None}
+            result = get_provider().add_task(params)
+        except ProviderError as bridge_error:
+            logger.error(f"Provider error creating todo: {bridge_error}")
+            return f"⚠️ Provider error: {bridge_error}"
 
-        # Check if the returned value is actually an error message rather than a valid task ID
+        task_id = result.get("id") if isinstance(result, dict) else None
         if not task_id:
-            return "⚠️ Error: Failed to create todo using AppleScript"
-
-        # Check if the returned value is actually an error message rather than a valid task ID
-        if isinstance(task_id, str) and ("script error" in task_id or task_id.startswith("/var/folders/") or task_id.startswith("Error:")):
-            logger.error("AppleScript returned error instead of task ID: %s", task_id)
-            return f"⚠️ AppleScript error: {task_id}"
+            return "⚠️ Error: Failed to create todo (no ID returned)"
 
         # Get location information for the success message
         try:
@@ -665,18 +658,19 @@ def add_new_project(
         if isinstance(notes, str):
             notes = notes.replace("+", " ").replace("%20", " ")
 
-        # Use the direct AppleScript approach which is more reliable
-        logger.info(f"Creating project using AppleScript: {title}")
+        logger.info(f"Creating project through provider: {title}")
 
-        # Call the AppleScript bridge directly
         try:
-            project_id = add_project(title=title, notes=notes, when=when, deadline=deadline, tags=tags, area_title=area_title, area_id=area_id, todos=todos)
-        except Exception as bridge_error:
-            logger.error(f"AppleScript bridge error: {bridge_error}")
-            return f"⚠️ AppleScript bridge error: {bridge_error}"
+            params = {"title": title, "notes": notes, "when": when, "deadline": deadline, "tags": tags, "area_title": area_title, "area_id": area_id, "todos": todos}
+            params = {k: v for k, v in params.items() if v is not None}
+            result = get_provider().add_project(params)
+        except ProviderError as bridge_error:
+            logger.error(f"Provider error creating project: {bridge_error}")
+            return f"⚠️ Provider error: {bridge_error}"
 
+        project_id = result.get("id") if isinstance(result, dict) else None
         if not project_id:
-            return "Error: Failed to create project using AppleScript"
+            return "Error: Failed to create project (no ID returned)"
 
         # Look up the project to get location information
         try:
@@ -745,40 +739,26 @@ def update_task(
         if isinstance(list_name, str):
             list_name = list_name.replace("+", " ").replace("%20", " ")
 
-        logger.info(f"Updating todo using AppleScript: {id}")
+        logger.info(f"Updating todo through provider: {id}")
 
-        # Call the AppleScript bridge directly
         try:
-            success = update_todo(
-                id=id,
-                title=title,
-                notes=notes,
-                when=when,
-                deadline=deadline,
-                tags=tags,
-                completed=completed,
-                canceled=canceled,
-                list_id=list_id,
-                list_name=list_name,
-            )
-            logger.debug(f"AppleScript bridge returned: {success!r} (type: {type(success)})")
-
-            # Handle various success cases
-            if "true" in str(success).lower():
-                logger.debug("Success case matched: 'true' in result")
-
-                return f"✅ Successfully updated todo with ID: {id}"
-            elif success.startswith("Error:"):
-                logger.error(f"AppleScript error: {success}")
-                return success
-            else:
-                logger.error(f"AppleScript update failed with result: {success!r}")
-                return f"Error: Failed to update todo using AppleScript. Result: {success}"
-
-        except Exception as bridge_error:
-            logger.error(f"AppleScript bridge error: {bridge_error}")
-            logger.error(f"Full bridge error traceback: {traceback.format_exc()}")
-            return f"⚠️ AppleScript bridge error: {bridge_error}"
+            params = {
+                "title": title,
+                "notes": notes,
+                "when": when,
+                "deadline": deadline,
+                "tags": tags,
+                "completed": completed,
+                "canceled": canceled,
+                "list_id": list_id,
+                "list_name": list_name,
+            }
+            params = {k: v for k, v in params.items() if v is not None}
+            get_provider().update_task(id, params)
+            return f"✅ Successfully updated todo with ID: {id}"
+        except ProviderError as bridge_error:
+            logger.error(f"Provider error updating todo: {bridge_error}")
+            return f"⚠️ Provider error: {bridge_error}"
 
     except Exception as e:
         logger.error(f"Error updating todo: {e!s}")
@@ -842,42 +822,27 @@ def update_existing_project(
             area_title = area_title.replace("+", " ").replace("%20", " ")
             logger.info(f"Cleaned area_title: {area_title!r}")
 
-        # Use the direct AppleScript approach which is more reliable
-        logger.info(f"Updating project using AppleScript: {id}")
+        logger.info(f"Updating project through provider: {id}")
 
-        # Call the AppleScript bridge directly
         try:
-            success = update_project(
-                id=id,
-                title=title,
-                notes=notes,
-                when=when,
-                deadline=deadline,
-                tags=tags,
-                completed=completed,
-                canceled=canceled,
-                list_name=list_name,
-                area_title=area_title,
-                area_id=area_id,
-            )
-            logger.debug(f"AppleScript bridge returned: {success!r} (type: {type(success)})")
-
-            # Handle various success cases
-            if "true" in str(success).lower():
-                logger.debug("Success case matched: 'true' in result")
-
-                return f"✅ Successfully updated project with ID: {id}"
-            elif success.startswith("Error:"):
-                logger.error(f"AppleScript error: {success}")
-                return success
-            else:
-                logger.error(f"AppleScript update failed with result: {success!r}")
-                return f"Error: Failed to update project using AppleScript. Result: {success}"
-
-        except Exception as bridge_error:
-            logger.error(f"AppleScript bridge error: {bridge_error}")
-            logger.error(f"Full bridge error traceback: {traceback.format_exc()}")
-            return f"⚠️ AppleScript bridge error: {bridge_error}"
+            params = {
+                "title": title,
+                "notes": notes,
+                "when": when,
+                "deadline": deadline,
+                "tags": tags,
+                "completed": completed,
+                "canceled": canceled,
+                "list_name": list_name,
+                "area_title": area_title,
+                "area_id": area_id,
+            }
+            params = {k: v for k, v in params.items() if v is not None}
+            get_provider().update_project(id, params)
+            return f"✅ Successfully updated project with ID: {id}"
+        except ProviderError as bridge_error:
+            logger.error(f"Provider error updating project: {bridge_error}")
+            return f"⚠️ Provider error: {bridge_error}"
 
     except Exception as e:
         logger.error(f"Error updating project: {e!s}")

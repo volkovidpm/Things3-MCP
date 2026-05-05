@@ -166,6 +166,30 @@ class CacheThingsProvider:
     def tags(self, include_items: bool = False, **kwargs: Any) -> list[dict[str, Any]]:
         return self._filter_list("tags", include_items=include_items, **kwargs)
 
+    # --- Write API ---------------------------------------------------------
+    # The cache is read-only by design. Surface a clear error so AutoThings
+    # write callers don't silently lose mutations into a stale snapshot.
+
+    def add_task(self, _params: dict[str, Any]) -> dict[str, Any]:
+        from .base import WriteUnsupported
+
+        raise WriteUnsupported("cache", "add_task")
+
+    def update_task(self, _uuid: str, _params: dict[str, Any]) -> dict[str, Any]:
+        from .base import WriteUnsupported
+
+        raise WriteUnsupported("cache", "update_task")
+
+    def add_project(self, _params: dict[str, Any]) -> dict[str, Any]:
+        from .base import WriteUnsupported
+
+        raise WriteUnsupported("cache", "add_project")
+
+    def update_project(self, _uuid: str, _params: dict[str, Any]) -> dict[str, Any]:
+        from .base import WriteUnsupported
+
+        raise WriteUnsupported("cache", "update_project")
+
 
 def _strip_nested_items(item: dict[str, Any]) -> dict[str, Any]:
     """Return a shallow copy without nested item collections."""

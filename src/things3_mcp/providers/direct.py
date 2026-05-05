@@ -76,3 +76,47 @@ class DirectThingsProvider:
             for tag in tags:
                 tag.setdefault("items", things.todos(tag=tag.get("title"), include_items=True))
         return tags
+
+    # --- Write API ---------------------------------------------------------
+    # These delegate to the legacy applescript_bridge from inside the MCP
+    # server process. They preserve historical behaviour for users who haven't
+    # set up the signed bridge — useful as a fallback when the bridge is down,
+    # but suffers the original transient-runtime TCC issues that motivated the
+    # bridge work in the first place.
+
+    def _coerce(self, result: Any, op_desc: str) -> dict[str, Any]:
+        from .base import ProviderError
+
+        if isinstance(result, bool):
+            if result:
+                return {"ok": True}
+            raise ProviderError("applescript_failed", f"AppleScript reported failure on {op_desc}")
+        if isinstance(result, str):
+            stripped = result.strip()
+            lowered = stripped.lower()
+            if lowered == "true":
+                return {"ok": True}
+            if any(marker in lowered for marker in ("error:", "applescript error", "⚠️", "failed", "exception")):
+                raise ProviderError("applescript_failed", f"AppleScript error on {op_desc}: {stripped}")
+            return {"ok": True, "id": stripped}
+        raise ProviderError("applescript_failed", f"Unexpected AppleScript result type on {op_desc}: {type(result).__name__}")
+
+    def add_task(self, params: dict[str, Any]) -> dict[str, Any]:
+        from things3_mcp import applescript_bridge as ab
+
+        return self._coerce(ab.add_todo(**params), "create todo")
+
+    def update_task(self, uuid: str, params: dict[str, Any]) -> dict[str, Any]:
+        from things3_mcp import applescript_bridge as ab
+
+        return self._coerce(ab.update_todo(id=uuid, **params), f"update todo {uuid}")
+
+    def add_project(self, params: dict[str, Any]) -> dict[str, Any]:
+        from things3_mcp import applescript_bridge as ab
+
+        return self._coerce(ab.add_project(**params), "create project")
+
+    def update_project(self, uuid: str, params: dict[str, Any]) -> dict[str, Any]:
+        from things3_mcp import applescript_bridge as ab
+
+        return self._coerce(ab.update_project(id=uuid, **params), f"update project {uuid}")
