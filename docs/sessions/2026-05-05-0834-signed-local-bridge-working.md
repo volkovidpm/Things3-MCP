@@ -334,6 +334,73 @@ stable identity.
 | Bridge endpoints | 17 (GET + POST + PATCH) | live + cache fallback (reads only) |
 | Provider chain | bridge → cache (reads) / bridge → direct (writes) | yes |
 
+### Architectural seam: cache fallback masks validation errors
+
+While turning the integration suite green, `test_search_advanced_empty_results`
+exposed a subtle interaction between `live_or_cache` and parameter validation
+in things-py.
+
+**The seam:**
+
+1. `provider.todos(tag="travl")` (typo for "travel") goes through the bridge.
+2. The live worker calls `things.todos(tag="travl")`, which raises
+   `ValueError: Unrecognized tag type: 'travl'\nValid tag types are [...]`.
+3. The worker catches the exception, falls through to JXA fallback (which
+   doesn't implement `todos`), then returns
+   `{"ok": false, "error_code": "things_db_unreadable", "message": "<details>"}`.
+4. `live_or_cache` sees the live failure and tries the cache provider.
+5. `CacheThingsProvider.todos(tag="travl")` iterates the cached snapshot,
+   filtering by tag. No items match → returns `[]`.
+6. `live_or_cache` returns `{"ok": true, "source": "cache", "data": [],
+   "live_error": {<the original ValueError>}}`.
+7. `BridgeThingsProvider.todos` sees `ok=true` → returns `[]`.
+8. `fast_server` formats `[]` as "No items found with tag 'travl'" — user
+   sees a *no-results* outcome instead of a *validation error*.
+
+The information is not lost — `live_error` carries the original message — but
+the MCP-tool layer doesn't surface it. The user's typo gets silently
+swallowed.
+
+**Audit of where this can bite:**
+
+| Provider call site | Things-py behaviour | Vulnerable? |
+|---|---|---|
+| `tasks(status="completed", stop_date=…)` in `get_logbook` | status is hardcoded valid | safe |
+| `trash()` in `get_trash` | no parameters | safe |
+| `todos(project=…)` in `get_todos`, `get_random_todos` | no validation (returns `[]`); `fast_server` pre-validates the UUID anyway | safe |
+| **`todos(tag=tag)` in `get_tagged_items`** | raises `ValueError` for unknown tags | **vulnerable** |
+| `search(query)` in `search_todos`, `search_all_items` | no validation | safe |
+| **`todos(**kwargs)` in `search_advanced`** | raises `ValueError` for unknown `status`/`tag`/`start`/`type` | **vulnerable** (test now pinned to direct provider) |
+| `last(period)` in `get_recent` | pre-validated in `fast_server` | safe |
+| `get(uuid)` everywhere | returns `None` for unknown | safe |
+
+Empirical map of which things-py kwargs raise vs return empty:
+- **Raise `ValueError`**: `tag`, `status`, `start`, `type`, `last("period")`.
+- **Return empty list**: `project=<uuid>`, `area=<uuid>`, `get(uuid)`,
+  `search(query)`.
+
+**Mitigation options (none implemented yet — out of scope for this PR):**
+
+1. **Worker error-code distinction** — emit `things_validation_error` for
+   `ValueError`/`TypeError` from things-py, vs `things_db_unreadable` for
+   transient runtime issues. `live_or_cache` would skip cache fallback for
+   validation errors and propagate them as ProviderError.
+2. **Pre-validation in fast_server** — `get_tagged_items` could call
+   `provider.tags()` first and check membership before calling `todos(tag=…)`.
+   Same idea for `search_advanced`'s `status`/`tag`/`start`/`type`. Adds a
+   round-trip but surfaces typos cleanly.
+3. **Surface `live_error` in BridgeThingsProvider** — when the bridge
+   response includes `live_error`, log a warning and optionally append
+   "(live attempt failed: <message>)" to the result. Visible to the user but
+   doesn't change the overall response shape.
+
+For the current PR, only `search_advanced` is covered (the test pins
+`THINGS3_MCP_PROVIDER=direct` so it exercises the strict path). `get_tagged_items`
+inherits the seam: a typo'd tag with a populated cache returns "No items
+found with tag 'travl'" instead of a tag-validation error. Documented as a
+known limitation; option 1 above is the right architectural fix when there's
+appetite for it.
+
 ### Updated next steps (still non-blocking)
 
 1. **`Things3-MCP-bridge --authorize-once` preflight** — call
@@ -345,11 +412,21 @@ stable identity.
    guidance). Still relevant; not done.
 3. **`readOnlyHint: true` MCP annotations** — auto-approval in Claude Desktop
    for the 19 read tools. Still relevant; not done.
-4. **Decide on `_disclaim.py` long-term** — keep gated as future-proofing for
-   if Apple un-breaks the API, or strip as dead code. No action needed.
+4. **`_disclaim.py` removed** — done in the review-fix commit (`9eba9c5`).
+   The C reproducer confirmed Tahoe rejects the API; gated dead code wasn't
+   earning its keep. Session note retains the trail in case Apple ever
+   un-breaks it.
 5. **Mark integration tests with `@pytest.mark.integration`** — the ~70
    tests that modify real Things data should be opt-in via `pytest -m
    integration`. Currently they run by default, which we deliberately avoid.
-6. **Cleanup**: the smoke-test todo `bridge-write-smoke-test (updated, delete
+6. **Distinguish validation errors from transient errors in the worker** —
+   see the "Architectural seam" section. Have the worker emit
+   `things_validation_error` for `ValueError`/`TypeError` from things-py
+   (unknown tag, status, start, type, malformed last-period); have
+   `live_or_cache` skip cache fallback for that error code so typos surface
+   to the user instead of being masked as "no results". Affects
+   `get_tagged_items` and `search_advanced` directly; cleanest single fix
+   for both.
+7. **Cleanup**: the smoke-test todo `bridge-write-smoke-test (updated, delete
    me)` (UUID `Ua8DgKsHcWJGUwQrYSQcNk`) is marked canceled in your Things
    logbook. Empty trash to remove permanently.
