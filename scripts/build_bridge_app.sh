@@ -6,6 +6,7 @@ APP_NAME="Things3 MCP Bridge"
 BUILD_DIR="${ROOT}/build/macos"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
 
+mkdir -p "${BUILD_DIR}"
 rm -rf "${APP_DIR}" "${BUILD_DIR}/pyinstaller-work"
 
 ENTRYPOINT="${BUILD_DIR}/bridge_entry.py"

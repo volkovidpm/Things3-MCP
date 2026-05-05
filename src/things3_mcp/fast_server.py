@@ -4,7 +4,6 @@ import json
 import random
 import traceback
 
-import things
 from mcp.server.fastmcp import FastMCP
 
 from .applescript_bridge import (
@@ -27,6 +26,50 @@ logger = get_logger(__name__)
 def _provider_error_response(error: ProviderError) -> str:
     """Render provider failures as clear MCP tool output instead of hangs."""
     return str(error)
+
+
+def _resolve_todo_location(task_id: str) -> str:
+    """Look up the new todo's project/area/list via the provider chain.
+
+    Used for the post-create success message ("✅ Successfully created todo:
+    Title (ID: …) in Project Foo"). Routed through the provider so this lookup
+    shares the bridge's stable identity rather than calling ``things.get()``
+    directly from the MCP-server process — otherwise any host without FDA gets
+    "in Unknown" silently. On any read failure we still fall back to "Unknown"
+    because the create itself already succeeded; the location is decoration.
+    """
+    try:
+        provider = get_provider()
+        todo = provider.get(task_id)
+        if not todo:
+            return "Unknown"
+        if todo.get("project"):
+            project = provider.get(todo["project"])
+            if project:
+                return f"Project: {project['title']}"
+        if todo.get("area"):
+            area = provider.get(todo["area"])
+            if area:
+                return f"Area: {area['title']}"
+        return f"List: {todo.get('start', 'Unknown')}"
+    except Exception:  # noqa: BLE001 - location is decorative; never block the create response
+        return "Unknown"
+
+
+def _resolve_project_location(project_id: str) -> str:
+    """Same as :func:`_resolve_todo_location` but for the post-create-project response."""
+    try:
+        provider = get_provider()
+        project = provider.get(project_id)
+        if not project:
+            return "Unknown"
+        if project.get("area"):
+            area = provider.get(project["area"])
+            if area:
+                return f"Area: {area['title']}"
+        return "List: Inbox"
+    except Exception:  # noqa: BLE001 - same reasoning as _resolve_todo_location
+        return "Unknown"
 
 
 def _format_todo_items(items: list[dict], provider) -> str:
@@ -523,11 +566,16 @@ def search_advanced(
         kwargs["type"] = type
 
     # Execute search with applicable filters via the provider chain.
+    # Preserve the legacy "Error in advanced search:" contract — callers (and
+    # tests) rely on this prefix to distinguish search failures from no-results
+    # outcomes. ProviderError gets unwrapped to its underlying message so
+    # things-py's ValueErrors (e.g. "Unrecognized tag type: '...'") surface
+    # with their original wording.
     try:
         provider = get_provider()
         todos = provider.todos(**kwargs)
     except ProviderError as e:
-        return _provider_error_response(e)
+        return f"Error in advanced search: {e.message}"
     except Exception as e:
         return f"Error in advanced search: {e!s}"
 
@@ -603,22 +651,10 @@ def add_task(
         if not task_id:
             return "⚠️ Error: Failed to create todo (no ID returned)"
 
-        # Get location information for the success message
-        try:
-            import things
-
-            todo = things.get(task_id)
-            if todo:
-                if todo.get("project"):
-                    location = f"Project: {things.get(todo['project'])['title']}"
-                elif todo.get("area"):
-                    location = f"Area: {things.get(todo['area'])['title']}"
-                else:
-                    location = f"List: {todo.get('start', 'Unknown')}"
-            else:
-                location = "Unknown"
-        except Exception:
-            location = "Unknown"
+        # Resolve location info for the success message via the provider so we
+        # don't bypass the bridge's stable identity here. On any read failure
+        # the location stays "Unknown" — the create itself already succeeded.
+        location = _resolve_todo_location(task_id)
 
         return f"✅ Successfully created todo: {title} (ID: {task_id}) in {location}"
 
@@ -683,20 +719,8 @@ def add_new_project(
         if not project_id:
             return "Error: Failed to create project (no ID returned)"
 
-        # Look up the project to get location information
-        try:
-            import things
-
-            project = things.get(project_id)
-            if project:
-                if project.get("area"):
-                    location = f"Area: {things.get(project['area'])['title']}"
-                else:
-                    location = "List: Inbox"
-            else:
-                location = "Unknown"
-        except Exception:
-            location = "Unknown"
+        # Resolve location via the provider chain — see _resolve_todo_location.
+        location = _resolve_project_location(project_id)
 
         return f"✅ Successfully created project: {title} (ID: {project_id}) in {location}"
 
@@ -890,20 +914,23 @@ def show_item(id: str, query: str | None = None, filter_tags: list[str] | None =
         elif id == "trash":
             return get_trash()
         else:
-            # For specific item IDs, try to get the item
+            # For specific item IDs, route through the provider chain.
             try:
-                item = things.get(id)
+                provider = get_provider()
+                item = provider.get(id)
                 if item:
                     if item.get("type") == "to-do":
-                        return format_todo(item)
+                        return format_todo(item, get_item=provider.get)
                     elif item.get("type") == "project":
-                        return format_project(item, include_items=True)
+                        return format_project(item, include_items=True, get_item=provider.get, get_todos=provider.todos)
                     elif item.get("type") == "area":
-                        return format_area(item, include_items=True)
+                        return format_area(item, include_items=True, get_projects=provider.projects, get_todos=provider.todos)
                     else:
                         return f"Found item: {item}"
                 else:
                     return f"No item found with ID: {id}"
+            except ProviderError as e:
+                return _provider_error_response(e)
             except Exception as e:
                 return f"Error retrieving item '{id}': {e!s}"
     except Exception as e:

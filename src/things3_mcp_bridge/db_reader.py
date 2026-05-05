@@ -14,7 +14,7 @@ import glob
 import json
 import os
 import sqlite3
-import subprocess
+import subprocess  # nosec B404 - required for invoking the read worker and osascript
 import sys
 import tempfile
 from pathlib import Path
@@ -218,7 +218,7 @@ def _data_folder_from_thingscli_defaults() -> str | None:
         if not thingscli.exists():
             continue
         try:
-            completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            completed = subprocess.run(  # noqa: S603 # nosec B603 - fixed argv, no shell
                 [str(thingscli), "defaults"],
                 capture_output=True,
                 text=True,
@@ -243,9 +243,10 @@ def _enumerate_db_patterns() -> list[str]:
     """Glob the protected Things group container for SQLite candidates.
 
     Only safe to call from inside the bridge worker, which holds Full Disk Access.
-    Returns the validated SQLite paths sorted lexicographically (most recent
-    ``ThingsData-*`` folders sort last; we pick the last one so a fresh data
-    folder takes precedence over a stale sibling).
+    ``ThingsData-*`` folder names are random alphanumeric hashes — lexicographic
+    sort doesn't reflect recency. Sort by the SQLite file's mtime so a fresh
+    data folder takes precedence over a stale sibling left behind by an old
+    install or sync.
     """
     matches: list[str] = []
     for pattern in _db_patterns():
@@ -254,7 +255,7 @@ def _enumerate_db_patterns() -> list[str]:
             validated = _valid_sqlite_path(candidate)
             if validated and validated not in matches:
                 matches.append(validated)
-    return sorted(matches)
+    return sorted(matches, key=lambda p: os.path.getmtime(p))
 
 
 def resolve_things_db_path() -> str:
@@ -404,7 +405,7 @@ def _run_jxa_script(script_content: str, action: str, params: dict[str, Any] | N
         f.write(script_content)
         script_path = f.name
     try:
-        completed = subprocess.run(  # noqa: S603 - fixed executable, no shell
+        completed = subprocess.run(  # noqa: S603 # nosec B603 - fixed executable, no shell
             ["/usr/bin/osascript", "-l", "JavaScript", script_path, action, json.dumps(params)],
             capture_output=True,
             text=True,

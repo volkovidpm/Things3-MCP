@@ -41,12 +41,31 @@ class UnavailableThingsProvider:
 
 
 class AutoThingsProvider:
-    """Provider that tries bridge, then cache, then optional direct fallback."""
+    """Provider that tries bridge, then cache, then optional direct fallback.
+
+    Reads use the cache as a graceful AFK fallback when the bridge is
+    unavailable. The direct (in-process AppleScript / things-py) provider only
+    enters the read chain when ``THINGS3_MCP_ALLOW_DIRECT_FALLBACK=1`` is set,
+    because direct reads from a non-FDA-having host process trigger TCC prompts.
+
+    Writes have no graceful degradation — a stale cache cannot satisfy a
+    mutation. The write chain therefore always includes the direct provider as
+    a fallback so installs that have not (yet) built the signed bridge keep
+    working with the legacy AppleScript path. This preserves the original
+    semantics: the bridge is an optional, additive durability win, not a
+    breaking replacement.
+    """
 
     source = "auto"
 
-    def __init__(self, providers: list[ThingsProvider] | None = None) -> None:
+    def __init__(
+        self,
+        providers: list[ThingsProvider] | None = None,
+        *,
+        write_providers: list[ThingsProvider] | None = None,
+    ) -> None:
         self.providers = providers or _auto_provider_chain()
+        self.write_providers = write_providers or _auto_write_chain()
 
     def _call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         first_error: ProviderError | None = None
@@ -108,13 +127,13 @@ class AutoThingsProvider:
         return self._call("last", period, include_items=include_items)
 
     # --- Write API ---------------------------------------------------------
-    # Writes never fall back to the cache (it can't satisfy mutations). They
-    # try the bridge first, and only the direct AppleScript path as fallback
-    # if THINGS3_MCP_ALLOW_DIRECT_FALLBACK=1.
+    # Writes never fall back to the cache (it can't satisfy mutations). The
+    # default chain is bridge → direct AppleScript so installs without the
+    # signed bridge built/authorised keep working via the legacy path.
 
     def _call_write(self, method_name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         first_error: ProviderError | None = None
-        for provider in self._write_chain():
+        for provider in self.write_providers:
             try:
                 return getattr(provider, method_name)(*args, **kwargs)
             except ProviderError as exc:
@@ -124,12 +143,6 @@ class AutoThingsProvider:
         if first_error:
             raise first_error
         raise ProviderError("bridge_unavailable", "No Things write provider candidates are configured")
-
-    def _write_chain(self) -> list[ThingsProvider]:
-        chain: list[ThingsProvider] = [p for p in self.providers if isinstance(p, BridgeThingsProvider)]
-        if _direct_fallback_allowed():
-            chain.extend(p for p in self.providers if isinstance(p, DirectThingsProvider))
-        return chain
 
     def add_task(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._call_write("add_task", params)
@@ -145,10 +158,25 @@ class AutoThingsProvider:
 
 
 def _auto_provider_chain() -> list[ThingsProvider]:
+    """Default read chain: bridge → cache → optional direct.
+
+    Direct reads from a non-FDA-having host trigger TCC prompts, so the direct
+    provider is opt-in for reads via ``THINGS3_MCP_ALLOW_DIRECT_FALLBACK=1``.
+    """
     providers: list[ThingsProvider] = [BridgeThingsProvider(), CacheThingsProvider()]
     if _direct_fallback_allowed():
         providers.append(DirectThingsProvider())
     return providers
+
+
+def _auto_write_chain() -> list[ThingsProvider]:
+    """Default write chain: bridge → direct.
+
+    The cache is excluded — it cannot satisfy a mutation and silent no-ops
+    would lose data. Direct is always present so installs without the signed
+    bridge built/authorised keep working with the legacy AppleScript path.
+    """
+    return [BridgeThingsProvider(), DirectThingsProvider()]
 
 
 def get_provider() -> ThingsProvider:

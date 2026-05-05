@@ -299,8 +299,8 @@ def test_cache_provider_refuses_writes():
     assert exc.value.error_code == "writes_unsupported"
 
 
-def test_auto_provider_writes_skip_cache_and_use_bridge_only():
-    """Writes must never silently fall back to the cache."""
+def test_auto_provider_writes_use_bridge_when_healthy():
+    """When the bridge succeeds, writes never reach any fallback provider."""
 
     class FakeBridge(BridgeThingsProvider):
         def __init__(self):
@@ -310,18 +310,28 @@ def test_auto_provider_writes_skip_cache_and_use_bridge_only():
             self.add_task_called_with = params
             return {"ok": True, "id": "from-bridge"}
 
+    class FakeDirect:
+        def __init__(self):
+            self.called = False
+
+        def add_task(self, _params):
+            self.called = True
+            return {"ok": True, "id": "from-direct"}
+
     bridge = FakeBridge()
-    cache = CacheThingsProvider()
-    auto = AutoThingsProvider(providers=[bridge, cache])
+    direct = FakeDirect()
+    auto = AutoThingsProvider(providers=[bridge, CacheThingsProvider()], write_providers=[bridge, direct])
 
     result = auto.add_task({"title": "test"})
     assert result == {"ok": True, "id": "from-bridge"}
     assert bridge.add_task_called_with == {"title": "test"}
+    assert direct.called is False, "Direct provider should not be called when bridge succeeds"
 
 
-def test_auto_provider_writes_surface_bridge_error_when_no_fallback(monkeypatch):
-    """Without ALLOW_DIRECT_FALLBACK, a bridge failure on writes propagates."""
-    monkeypatch.delenv("THINGS3_MCP_ALLOW_DIRECT_FALLBACK", raising=False)
+def test_auto_provider_writes_fall_back_to_direct_when_bridge_fails():
+    """Bridge failures must fall through to the direct AppleScript path so
+    installs without the bridge built/authorised keep working.
+    """
 
     class FailingBridge(BridgeThingsProvider):
         def __init__(self):
@@ -330,10 +340,166 @@ def test_auto_provider_writes_surface_bridge_error_when_no_fallback(monkeypatch)
         def add_task(self, _params):
             raise ProviderError("bridge_unavailable", "socket gone")
 
-    auto = AutoThingsProvider(providers=[FailingBridge(), CacheThingsProvider()])
+    class FakeDirect:
+        def __init__(self):
+            self.add_task_called_with: dict[str, Any] | None = None
+
+        def add_task(self, params):
+            self.add_task_called_with = params
+            return {"ok": True, "id": "from-direct"}
+
+    bridge = FailingBridge()
+    direct = FakeDirect()
+    auto = AutoThingsProvider(providers=[bridge, CacheThingsProvider()], write_providers=[bridge, direct])
+
+    result = auto.add_task({"title": "test"})
+    assert result == {"ok": True, "id": "from-direct"}
+    assert direct.add_task_called_with == {"title": "test"}
+
+
+def test_auto_provider_writes_surface_bridge_error_when_no_fallback():
+    """When the write chain has no direct fallback, bridge errors propagate.
+
+    Production code never wires this configuration (the default
+    ``_auto_write_chain`` always includes Direct), but explicit construction
+    in tests / programmatic use must not silently swallow the error.
+    """
+
+    class FailingBridge(BridgeThingsProvider):
+        def __init__(self):
+            pass
+
+        def add_task(self, _params):
+            raise ProviderError("bridge_unavailable", "socket gone")
+
+    auto = AutoThingsProvider(
+        providers=[FailingBridge(), CacheThingsProvider()],
+        write_providers=[FailingBridge()],
+    )
     with pytest.raises(ProviderError) as exc:
         auto.add_task({"title": "x"})
     assert exc.value.error_code == "bridge_unavailable"
+
+
+def test_default_auto_write_chain_includes_direct():
+    """The factory chain must always include direct so the bridge stays optional."""
+    from things3_mcp.providers import _auto_write_chain
+    from things3_mcp.providers.direct import DirectThingsProvider
+
+    chain = _auto_write_chain()
+    types = [type(p) for p in chain]
+    assert BridgeThingsProvider in types, "Bridge should always be in the write chain"
+    assert DirectThingsProvider in types, "Direct should always be in the write chain (fallback when bridge is absent)"
+
+
+# --- Bridge HTTP authorization (security) ---------------------------------
+
+
+def test_bridge_authorization_uses_constant_time_comparison(monkeypatch):
+    """``_authorized`` should use ``hmac.compare_digest`` to defeat timing oracles."""
+    import hmac as hmac_module
+
+    from things3_mcp_bridge import server as bridge_server
+
+    monkeypatch.setattr(bridge_server, "ensure_token", lambda: "real-token-value")
+
+    # Hook compare_digest so we can prove it was called.
+    calls: list[tuple[str, str]] = []
+    real_compare = hmac_module.compare_digest
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real_compare(a, b)
+
+    monkeypatch.setattr(bridge_server.hmac, "compare_digest", spy)
+
+    handler = bridge_server.BridgeRequestHandler.__new__(bridge_server.BridgeRequestHandler)
+    handler.path = "/things/inbox"
+    handler.headers = {"Authorization": "Bearer real-token-value"}
+
+    assert handler._authorized() is True
+    assert calls, "compare_digest should be invoked"
+
+
+def test_bridge_authorization_rejects_empty_token_file(monkeypatch):
+    """An empty token file must NOT authorize an empty Authorization header.
+
+    Pre-fix: ``"Bearer " == "Bearer " + ""`` → True. That's an authentication
+    bypass for any local process at the same UID if the token file got
+    truncated. Post-fix: empty expected token → fail closed.
+    """
+    from things3_mcp_bridge import server as bridge_server
+
+    monkeypatch.setattr(bridge_server, "ensure_token", lambda: "")
+
+    handler = bridge_server.BridgeRequestHandler.__new__(bridge_server.BridgeRequestHandler)
+    handler.path = "/things/inbox"
+    handler.headers = {"Authorization": "Bearer "}
+    assert handler._authorized() is False, "Empty token must never authorize"
+
+    handler.headers = {"Authorization": ""}
+    assert handler._authorized() is False, "Empty header must never authorize"
+
+
+def test_bridge_authorization_rejects_missing_header(monkeypatch):
+    from things3_mcp_bridge import server as bridge_server
+
+    monkeypatch.setattr(bridge_server, "ensure_token", lambda: "real-token")
+
+    handler = bridge_server.BridgeRequestHandler.__new__(bridge_server.BridgeRequestHandler)
+    handler.path = "/things/inbox"
+    handler.headers = {}  # no Authorization header at all
+    assert handler._authorized() is False
+
+
+def test_bridge_token_file_created_with_owner_only_permissions(monkeypatch, tmp_path):
+    """``ensure_token`` must create the token file with mode 0o600 atomically.
+
+    Pre-fix sequence: write_text() (creates 0o644 by default umask) → chmod 0o600.
+    Window: another local process at the same UID can read the token.
+    Post-fix: ``os.open(O_CREAT|O_EXCL|O_WRONLY, 0o600)`` is atomic.
+    """
+    from things3_mcp_bridge import server as bridge_server
+
+    token_file = tmp_path / "subdir" / "bridge.token"
+    bridge_server.ensure_token(token_file)
+
+    mode = token_file.stat().st_mode & 0o777
+    assert mode == 0o600, f"Expected 0o600 but got {oct(mode)}"
+
+    # Owner-only is also required for the parent directory.
+    parent_mode = token_file.parent.stat().st_mode & 0o777
+    assert parent_mode == 0o700, f"Expected parent dir 0o700 but got {oct(parent_mode)}"
+
+    # Re-call should be idempotent and return the same token.
+    assert bridge_server.ensure_token(token_file) == token_file.read_text()
+
+
+# --- live_or_cache surface for both-failed scenarios ----------------------
+
+
+def test_live_or_cache_combines_errors_when_both_fail(monkeypatch):
+    """When the live worker AND the cache provider both fail, the response should
+    expose both errors so the user knows the cache is also missing.
+    """
+    from things3_mcp_bridge import server as bridge_server
+
+    monkeypatch.setattr(
+        bridge_server,
+        "run_worker",
+        lambda *_args, **_kwargs: {"ok": False, "error_code": "things_db_timeout", "message": "live failed"},
+    )
+    monkeypatch.setattr(
+        bridge_server,
+        "_cache_envelope",
+        lambda *_args, **_kwargs: {"ok": False, "error_code": "cache_missing", "message": "no snapshot"},
+    )
+
+    envelope = bridge_server.live_or_cache("inbox", {"include_items": True})
+    assert envelope["ok"] is False
+    assert envelope["error_code"] == "things_db_timeout"  # primary live error preserved
+    assert "cache_error" in envelope
+    assert envelope["cache_error"]["error_code"] == "cache_missing"
 
 
 def test_worker_run_action_dispatches_add_task_to_applescript(monkeypatch):
@@ -607,10 +773,41 @@ def test_bridge_provider_last_passes_period_in_path(monkeypatch, tmp_path):
     assert captured["path"] == "/things/last/7d?include_items=true"
 
 
-def test_cache_provider_returns_empty_for_trash_and_last():
+def test_cache_provider_raises_cache_miss_for_unsupported_reads():
+    """``trash`` and ``last`` aren't materialised in the snapshot; the cache
+    provider must raise so AutoThingsProvider falls through to the next
+    provider rather than treating an empty list as a hit.
+    """
     provider = CacheThingsProvider()
-    assert provider.trash() == []
-    assert provider.last("7d") == []
+
+    with pytest.raises(ProviderError) as trash_exc:
+        provider.trash()
+    assert trash_exc.value.error_code == "cache_miss"
+
+    with pytest.raises(ProviderError) as last_exc:
+        provider.last("7d")
+    assert last_exc.value.error_code == "cache_miss"
+
+
+def test_auto_provider_falls_through_cache_miss_for_unsupported_reads():
+    """When the bridge is down and the cache surfaces ``cache_miss`` for
+    ``trash``/``last``, the auto-provider should walk to the next provider
+    (direct, when configured) instead of bubbling up the cache miss.
+    """
+
+    class FailingBridge(BridgeThingsProvider):
+        def __init__(self):
+            pass
+
+        def trash(self, include_items: bool = True):  # noqa: ARG002
+            raise ProviderError("bridge_unavailable", "socket gone")
+
+    class StubDirect:
+        def trash(self, include_items: bool = True):  # noqa: ARG002
+            return [{"title": "from direct", "uuid": "1", "type": "to-do"}]
+
+    auto = AutoThingsProvider(providers=[FailingBridge(), CacheThingsProvider(), StubDirect()])
+    assert auto.trash()[0]["title"] == "from direct"
 
 
 def test_worker_run_action_dispatches_trash_and_last(monkeypatch):

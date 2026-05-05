@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import secrets
 import socketserver
 import stat
-import subprocess
+import subprocess  # nosec B404 - required for spawning the worker
 import sys
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -19,7 +20,6 @@ from things3_mcp.providers.base import ProviderError
 from things3_mcp.providers.bridge import DEFAULT_SOCKET, DEFAULT_TOKEN_FILE
 from things3_mcp.providers.cache import CacheStore, CacheThingsProvider
 
-from ._disclaim import DISCLAIM_AVAILABLE, DisclaimError, spawn_disclaimed
 from .auth_status import AUTHORIZATION_HINT, build_auth_status
 from .cache import cache_status, write_snapshot
 from .protocol import error_envelope, ok_envelope
@@ -41,11 +41,13 @@ def _restrict_owner_only(path: Path, *, is_dir: bool) -> None:
 
 
 def ensure_token(token_file: Path = DEFAULT_TOKEN_FILE) -> str:
-    """Create/read the local bearer token, locked down to the current user."""
-    # The parent directory holds the bearer token that grants access to the
-    # bridge's privileged API. We deliberately restrict it to the owner only;
-    # 0o644 (semgrep's "good default") would let other local users read the
-    # token. mkdir(mode=...) only sets perms on newly-created directories.
+    """Create/read the local bearer token, locked down to the current user.
+
+    Token creation uses ``os.open(..., O_CREAT | O_EXCL | O_WRONLY, 0o600)`` so
+    the file is created with owner-only permissions atomically — no window
+    where another local process at the same UID could race-read a freshly
+    written but not-yet-chmodded token.
+    """
     parent = token_file.parent
     parent.mkdir(parents=True, exist_ok=True)
     _restrict_owner_only(parent, is_dir=True)
@@ -53,20 +55,24 @@ def ensure_token(token_file: Path = DEFAULT_TOKEN_FILE) -> str:
         os.chmod(token_file, 0o600)
         return token_file.read_text().strip()
     token = secrets.token_urlsafe(32)
-    token_file.write_text(token)
-    os.chmod(token_file, 0o600)
+    fd = os.open(str(token_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.write(fd, token.encode())
+    finally:
+        os.close(fd)
     return token
 
 
 def run_worker(action: str, params: dict[str, Any] | None = None, *, timeout: float = DEFAULT_WORKER_TIMEOUT) -> dict[str, Any]:
-    """Run a live DB read in a killable child process.
+    """Run a Things action in a killable child process.
 
-    On macOS, spawn the child with ``responsibility_spawnattrs_setdisclaim``
-    so the worker becomes its own TCC responsible code rather than inheriting
-    the bridge's poisoned chain (e.g. Bun/OpenClaw). The worker is the same
-    signed Mach-O as the bundle, so TCC matches it against the bundle's FDA /
-    Automation grant directly. Falls back to plain ``subprocess.run`` when
-    disclaim isn't available (non-macOS / dev runs).
+    The worker is the same signed Mach-O as the bridge bundle, so TCC matches
+    its code identity directly against the bundle's FDA / Automation grants.
+    No disclaim shim — ``responsibility_spawnattrs_setdisclaim`` is broken on
+    macOS Tahoe (verified with a pure-C reproducer); the bridge's own
+    responsibility chain is what matters and gets cleared by reboot rather
+    than by per-spawn disclaim. See docs/sessions/2026-05-05-0834-… for the
+    full debugging trail.
     """
     is_frozen = getattr(sys, "frozen", False)
     if is_frozen:
@@ -74,31 +80,13 @@ def run_worker(action: str, params: dict[str, Any] | None = None, *, timeout: fl
     else:
         cmd = [sys.executable, "-m", "things3_mcp_bridge.db_reader", action, "--params", json.dumps(params or {})]
 
-    # Disclaim only matters when the worker child is the signed bundle binary.
-    # In dev/test mode the child is a regular Python interpreter that has no
-    # bundle code identity, so disclaim doesn't help; fall through to subprocess.
-    # On macOS Tahoe, responsibility_spawnattrs_setdisclaim returns EINVAL — set
-    # THINGS3_MCP_NO_DISCLAIM=1 to fall back to subprocess.run for diagnostics.
-    no_disclaim_env = os.environ.get("THINGS3_MCP_NO_DISCLAIM", "").lower() in {"1", "true", "yes"}
-    use_disclaim = is_frozen and DISCLAIM_AVAILABLE and not no_disclaim_env
-    print(f"[bridge] run_worker action={action} use_disclaim={use_disclaim} frozen={is_frozen} disclaim_avail={DISCLAIM_AVAILABLE} no_disclaim_env={no_disclaim_env}", file=sys.stderr, flush=True)
-    if use_disclaim:
-        try:
-            result = spawn_disclaimed(cmd, capture_stdout=True, capture_stderr=False, timeout=timeout)
-        except DisclaimError as exc:
-            msg = str(exc)
-            if "did not exit within" in msg:
-                return error_envelope("things_db_timeout", f"Things DB read worker timed out after {timeout:g}s", authorization_hint=AUTHORIZATION_HINT, cache_status=cache_status())
-            return error_envelope("things_db_unreadable", f"disclaim spawn failed: {msg}", authorization_hint=AUTHORIZATION_HINT, cache_status=cache_status())
-        stdout = result.stdout.strip()
-    else:
-        try:
-            # Capture stdout (the worker's JSON envelope) but let stderr flow through
-            # to the bridge's own stderr so worker-progress traces land in bridge.err.log.
-            completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True, timeout=timeout, check=False)  # noqa: S603 - fixed argv, no shell
-        except subprocess.TimeoutExpired:
-            return error_envelope("things_db_timeout", f"Things DB read worker timed out after {timeout:g}s", authorization_hint=AUTHORIZATION_HINT, cache_status=cache_status())
-        stdout = completed.stdout.strip()
+    try:
+        # Capture stdout (the worker's JSON envelope) but let stderr flow through
+        # to the bridge's own stderr so worker-progress traces land in bridge.err.log.
+        completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True, timeout=timeout, check=False)  # noqa: S603 # nosec B603 - fixed argv, no shell
+    except subprocess.TimeoutExpired:
+        return error_envelope("things_db_timeout", f"Things DB read worker timed out after {timeout:g}s", authorization_hint=AUTHORIZATION_HINT, cache_status=cache_status())
+    stdout = completed.stdout.strip()
 
     if not stdout:
         return error_envelope("things_db_unreadable", "Things DB read worker returned no output", authorization_hint=AUTHORIZATION_HINT, cache_status=cache_status())
@@ -130,7 +118,14 @@ def _cache_envelope(action: str, params: dict[str, Any] | None = None) -> dict[s
 
 
 def live_or_cache(action: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Attempt live worker read, falling back to cache on authorization/read failure."""
+    """Attempt live worker read, falling back to cache on authorization/read failure.
+
+    When both fail (e.g. fresh install where the bridge is not yet authorised
+    *and* no cache snapshot has been written), surface both error envelopes so
+    the user sees that cache is also missing — otherwise the response only
+    mentions the live failure and the user wonders silently about the cache
+    state.
+    """
     live = run_worker(action, params)
     if live.get("ok"):
         return live
@@ -138,7 +133,10 @@ def live_or_cache(action: str, params: dict[str, Any] | None = None) -> dict[str
     if cached.get("ok"):
         cached["live_error"] = {key: live.get(key) for key in ("error_code", "message", "authorization_hint") if live.get(key)}
         return cached
-    return live
+    # Both failed — annotate the live envelope with the cache error fields too.
+    combined = dict(live)
+    combined["cache_error"] = {key: cached.get(key) for key in ("error_code", "message") if cached.get(key)}
+    return combined
 
 
 def _run_write(action: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -150,10 +148,18 @@ def _run_write(action: str, params: dict[str, Any] | None = None) -> dict[str, A
     return run_worker(action, params)
 
 
-class UnixHTTPServer(socketserver.UnixStreamServer):
-    """Unix-domain HTTP server."""
+class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """Unix-domain HTTP server with one thread per request.
+
+    A single hung worker subprocess (e.g. tccd queueing on first call) shouldn't
+    block ``/health`` or other concurrent requests — without threading, every
+    other call sits behind the slow one. Each request handler spawns a child
+    via ``run_worker``; threading the HTTP layer is safe because no shared
+    mutable state is touched outside the worker subprocess.
+    """
 
     allow_reuse_address = True
+    daemon_threads = True
 
     def server_bind(self) -> None:
         socketserver.UnixStreamServer.server_bind(self)
@@ -175,7 +181,13 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             return True
         expected = ensure_token()
-        return self.headers.get("Authorization") == f"Bearer {expected}"
+        if not expected:
+            # Empty/missing token file → treat as unauthorized rather than
+            # accepting a request whose Authorization header also happens to
+            # be empty. (Fail closed.)
+            return False
+        provided = self.headers.get("Authorization") or ""
+        return hmac.compare_digest(provided, f"Bearer {expected}")
 
     def _send(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload).encode()
@@ -278,10 +290,7 @@ def serve(socket_path: Path = DEFAULT_SOCKET) -> None:
     if socket_path.exists():
         socket_path.unlink()
     is_frozen = getattr(sys, "frozen", False)
-    print(
-        f"Things3 MCP bridge starting: frozen={is_frozen} disclaim_available={DISCLAIM_AVAILABLE} will_use_disclaim={is_frozen and DISCLAIM_AVAILABLE}",
-        file=sys.stderr,
-    )
+    print(f"Things3 MCP bridge starting: frozen={is_frozen}", file=sys.stderr)
     with UnixHTTPServer(str(socket_path), BridgeRequestHandler) as server:
         print(f"Things3 MCP bridge listening on {socket_path}", file=sys.stderr)
         server.serve_forever()
