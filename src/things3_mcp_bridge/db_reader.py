@@ -340,12 +340,37 @@ def _fda_probe() -> dict[str, Any]:
     }
 
 
+def things_process_running() -> bool:
+    """Return whether Things.app is currently running.
+
+    The bridge can be healthy and the SQLite read path can work even when
+    Things.app is closed. Writes still need Things.app to be running because
+    they go through AppleScript, so expose this process check in diagnostics.
+    """
+    try:
+        completed = subprocess.run(  # noqa: S603 # nosec B603 - fixed executable and script
+            [
+                "/usr/bin/osascript",
+                "-e",
+                'tell application "System Events" to exists process "Things3"',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must not fail the whole diagnose path
+        return False
+    return completed.returncode == 0 and completed.stdout.strip().lower() == "true"
+
+
 def diagnose_access() -> dict[str, Any]:
     """Return local DB-path diagnostics from the bridge identity.
 
     Runs inside the worker, so it can glob the protected group container.
     """
     patterns: list[dict[str, Any]] = []
+    things_running = things_process_running()
     for pattern in _db_patterns():
         expanded = os.path.expanduser(pattern)
         try:
@@ -374,6 +399,7 @@ def diagnose_access() -> dict[str, Any]:
             "readable": readable,
             "sqlite_ok": sqlite_ok,
             "sqlite_error": sqlite_error,
+            "things_process_running": things_running,
             "patterns": patterns,
             "fda_probe": fda_probe,
             "data_folder_env": os.environ.get(DATA_FOLDER_ENV),
@@ -383,6 +409,7 @@ def diagnose_access() -> dict[str, Any]:
         return {
             "ok": False,
             "error": str(exc),
+            "things_process_running": things_running,
             "patterns": patterns,
             "fda_probe": fda_probe,
             "data_folder_env": os.environ.get(DATA_FOLDER_ENV),

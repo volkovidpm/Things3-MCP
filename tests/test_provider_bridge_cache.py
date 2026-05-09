@@ -217,6 +217,7 @@ def test_diagnose_access_enumerates_group_container(monkeypatch, tmp_path):
     monkeypatch.setattr(db_reader, "_data_folder_from_thingscli_defaults", lambda: None)
     monkeypatch.setattr(db_reader.glob, "glob", lambda _pattern: [str(fake_db)])
     monkeypatch.setattr(db_reader, "_can_open_sqlite", lambda _path: True)
+    monkeypatch.setattr(db_reader, "things_process_running", lambda: True)
 
     result = db_reader.diagnose_access()
 
@@ -224,6 +225,51 @@ def test_diagnose_access_enumerates_group_container(monkeypatch, tmp_path):
     assert result["path"] == str(fake_db)
     assert result["patterns"]
     assert result["patterns"][0]["matches"] == [str(fake_db)]
+    assert result["things_process_running"] is True
+
+
+def test_things_process_running_uses_system_events(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = "true\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return FakeCompleted()
+
+    monkeypatch.setattr(db_reader.subprocess, "run", fake_run)
+
+    assert db_reader.things_process_running() is True
+    assert captured["cmd"] == [
+        "/usr/bin/osascript",
+        "-e",
+        'tell application "System Events" to exists process "Things3"',
+    ]
+    assert captured["kwargs"]["timeout"] == 5
+
+
+def test_things_process_running_returns_false_when_process_absent(monkeypatch):
+    class FakeCompleted:
+        returncode = 0
+        stdout = "false\n"
+        stderr = ""
+
+    monkeypatch.setattr(db_reader.subprocess, "run", lambda *_args, **_kwargs: FakeCompleted())
+
+    assert db_reader.things_process_running() is False
+
+
+def test_things_process_running_returns_false_on_error(monkeypatch):
+    def fake_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["osascript"], timeout=5)
+
+    monkeypatch.setattr(db_reader.subprocess, "run", fake_run)
+
+    assert db_reader.things_process_running() is False
 
 
 def test_snapshot_falls_back_to_apple_events_when_sqlite_path_unresolved(monkeypatch):
