@@ -560,3 +560,156 @@ Updated `README.md`, `docs/security/local-bridge-security.md`,
 `scripts/sign_bridge_app.sh`, and `scripts/install_bridge_launchagent.sh` to
 call out the signing-key caveat explicitly. Added Apple code-signing references
 to the security doc.
+
+### Update - 2026-05-05 17:33 IST: Bridge App Icon
+
+Added a branded macOS icon to the bridge app so the installed bundle is less of
+a generic PyInstaller/developer-mode artefact in Finder/System Settings.
+
+Changes made:
+
+- Added `packaging/macos/Things3MCPBridge.icns`, generated from the existing
+  `docs/images/Things3-MCP-logo.png` logo as a square macOS ICNS asset.
+- Updated `scripts/build_bridge_app.sh` to require the icon asset, pass it to
+  PyInstaller with `--icon`, copy it into `Contents/Resources`, and set
+  `CFBundleIconFile=Things3MCPBridge.icns`.
+- Updated `packaging/macos/Things3 MCP Bridge.app/Contents/Info.plist.template`
+  with the same `CFBundleIconFile` value.
+
+Verification:
+
+- `file packaging/macos/Things3MCPBridge.icns` reports a macOS icon with PNG
+  chunks.
+- `iconutil --convert iconset ... packaging/macos/Things3MCPBridge.icns`
+  succeeds, confirming macOS can parse the asset.
+- `scripts/build_bridge_app.sh` rebuilt the app bundle successfully.
+- The built `Info.plist` reports `CFBundleIconFile=Things3MCPBridge.icns`.
+- The built app contains
+  `Contents/Resources/Things3MCPBridge.icns`.
+- `build/macos/Things3 MCP Bridge.app/Contents/MacOS/Things3 MCP Bridge --health`
+  returned bridge/cache status without touching live Things data.
+
+### Update - 2026-05-06 08:16 IST: Clawbridge Things Icon Rebuild
+
+Ross supplied `~/Downloads/clawbridge-things.png` as the bridge app artwork.
+Replaced the generated `packaging/macos/Things3MCPBridge.icns` asset with an
+ICNS built from that square PNG, keeping the same bundle resource name so the
+existing build script and plist changes continue to apply cleanly.
+
+Rebuilt `build/macos/Things3 MCP Bridge.app` with `scripts/build_bridge_app.sh`.
+The rebuilt bundle now embeds the refreshed `Things3MCPBridge.icns` resource and
+sets `CFBundleIconFile=Things3MCPBridge.icns`.
+
+Verification:
+
+- `iconutil --convert iconset ... packaging/macos/Things3MCPBridge.icns`
+  succeeds and extracts 7 icon sizes.
+- `bash -n scripts/build_bridge_app.sh` passes.
+- `scripts/build_bridge_app.sh` rebuilt the app bundle successfully.
+- The rebuilt app contains
+  `Contents/Resources/Things3MCPBridge.icns`.
+- `build/macos/Things3 MCP Bridge.app/Contents/MacOS/Things3 MCP Bridge --health`
+  returned `ok: true`.
+
+### Update - 2026-05-06 09:55 IST: Streaks-Style Icon Packaging and Skill
+
+Ross pointed out that the Streaks bridge app in
+`/Users/ross/Development/Streaks-Agent-Scripts` already had a working icon for
+the same PyInstaller bridge pattern. The durable fix was to mirror that approach
+instead of continuing to debug `iconutil`/LaunchServices behaviour in isolation.
+
+Changes made:
+
+- Regenerated `packaging/macos/Things3MCPBridge.icns` with the same PNG-backed
+  ICNS chunk pattern used by Streaks (`icp4`, `icp5`, `icp6`, `ic07`, `ic08`,
+  `ic09`, `ic10`).
+- Updated `scripts/build_bridge_app.sh` to define `PLIST_TEMPLATE` and copy the
+  checked-in plist template over PyInstaller's generated `Info.plist`, matching
+  the Streaks build script shape.
+- Updated
+  `packaging/macos/Things3 MCP Bridge.app/Contents/Info.plist.template` so
+  `CFBundleExecutable` is `Things3 MCP Bridge` and `CFBundleIconFile` is the
+  basename `Things3MCPBridge`.
+- Rebuilt, re-signed, reinstalled, and restarted the installed bridge app.
+- Created the reusable skill
+  `/Users/ross/AI/ross-system-prompts/.claude/skills/pyinstaller-macos-app-icons`
+  with a helper script for generating the Streaks-style ICNS file.
+
+Verification:
+
+- `scripts/build_bridge_app.sh` rebuilt the app successfully.
+- `scripts/sign_bridge_app.sh --identity "Things3 MCP Local"` signed the rebuilt
+  bundle and `codesign --verify --deep --strict --verbose=2` passed.
+- `scripts/install_bridge_launchagent.sh` installed and bootstrapped the
+  LaunchAgent successfully after the Streaks-style packaging change.
+- Installed plist reports `CFBundleExecutable=Things3 MCP Bridge` and
+  `CFBundleIconFile=Things3MCPBridge`.
+- Installed icon resource reports a macOS icon beginning with `icp4`.
+- `uv run --locked python scripts/check_bridge.py --snapshot --timeout 60`
+  succeeded through the installed bridge and refreshed the live cache at
+  `2026-05-06T08:51:06.191525+00:00`.
+- `pyinstaller-macos-app-icons` passed `quick_validate.py`, and its
+  `scripts/make_icns.py` helper successfully generated and inspected a test
+  ICNS from `~/Downloads/clawbridge-things.png`.
+
+### Update - 2026-05-06 10:05 IST: Bridge Pathway Validation
+
+Validated the installed, signed bridge pathways after the icon/re-sign/reinstall
+work and Ross's latest whitelisting pass.
+
+Runtime checks:
+
+- `uv run --locked python scripts/check_bridge.py --timeout 5` reported the
+  installed bridge running, socket reachable, token file present, non-ad-hoc
+  code signature, and readable live cache.
+- `launchctl print gui/$(id -u)/com.rossshannon.things3-mcp.bridge` showed the
+  LaunchAgent running `/Users/ross/Applications/Things3 MCP Bridge.app`.
+- `codesign -dv --verbose=4 "$HOME/Applications/Things3 MCP Bridge.app"`
+  reported authority `Things3 MCP Local` and identifier
+  `com.rossshannon.things3-mcp.bridge`.
+- Installed `Info.plist` reports `CFBundleIconFile=Things3MCPBridge`, matching
+  the working Streaks-style packaging.
+- `uv run --locked python scripts/check_bridge.py --snapshot --timeout 60`
+  succeeded through the installed bridge and refreshed the cache at
+  `2026-05-06T08:59:36.902999+00:00`.
+
+Provider and MCP-surface checks:
+
+- `THINGS3_MCP_PROVIDER=bridge` read inbox, today, upcoming, anytime, someday,
+  todos, projects, areas, tags, and search successfully through the bridge.
+- `THINGS3_MCP_PROVIDER=cache` returned matching read counts from the JSON cache
+  and refused `add_task` with `writes_unsupported`.
+- `THINGS3_MCP_PROVIDER=auto` returned matching read counts with direct fallback
+  disabled.
+- Forced auto fallback with `THINGS3_MCP_BRIDGE_SOCKET=/tmp/things3-mcp-missing-bridge.sock`
+  served inbox/today/projects from cache, proving the bridge-down cache pathway.
+- MCP-facing functions `get_inbox`, `get_today`, `get_projects`, `get_areas`,
+  `get_tags`, and `search_todos` passed under bridge, cache, and forced
+  auto-cache-fallback modes. Bridge-only `get_trash(limit=5)` and
+  `get_recent("1d")` also passed.
+- Bridge HTTP `/diagnose` through the running LaunchAgent sees Full Disk Access
+  and the Things database. Running the bundled executable directly from
+  Terminal with `--worker-action diagnose` does not see the same FDA grant, so
+  permission-sensitive validation should go through the installed LaunchAgent
+  route.
+- `THINGS3_MCP_PROVIDER=direct` failed in this environment with
+  `sqlite3.OperationalError: unable to open database file`, matching the known
+  TCC-fragility of the legacy direct read path.
+
+Automated tests:
+
+- Initial `uv run --locked pytest tests/test_provider_bridge_cache.py -q`
+  failed before tests ran because the global test fixture's AppleScript
+  readiness probe returned macOS error `-10827`.
+- Re-running with `THINGS3_MCP_SKIP_THINGS_TEST_SETUP=1` inside the sandbox gave
+  `33 passed, 16 failed`; all 16 failures were `PermissionError` opening
+  `/Users/ross/.things-mcp/logs/things3_mcp_structured.json` during
+  `fast_server` import.
+- Re-running the same focused suite outside the sandbox with
+  `THINGS3_MCP_SKIP_THINGS_TEST_SETUP=1` passed: `49 passed in 0.44s`.
+
+Not run:
+
+- The Automation write pathway was not exercised because it requires creating or
+  updating a real Things item. Use a deliberately named test todo/project if
+  Ross approves a mutating validation pass.

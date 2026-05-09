@@ -5,6 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="Things3 MCP Bridge"
 BUILD_DIR="${ROOT}/build/macos"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
+PLIST_TEMPLATE="${ROOT}/packaging/macos/Things3 MCP Bridge.app/Contents/Info.plist.template"
+ICON_FILE="${ROOT}/packaging/macos/Things3MCPBridge.icns"
+ICON_RESOURCE_NAME="Things3MCPBridge.icns"
+
+if [[ ! -f "${ICON_FILE}" ]]; then
+  echo "Bridge icon not found: ${ICON_FILE}" >&2
+  exit 1
+fi
 
 mkdir -p "${BUILD_DIR}"
 rm -rf "${APP_DIR}" "${BUILD_DIR}/pyinstaller-work"
@@ -23,6 +31,7 @@ uv run --locked pyinstaller \
   --onedir \
   --windowed \
   --name "${APP_NAME}" \
+  --icon "${ICON_FILE}" \
   --osx-bundle-identifier com.rossshannon.things3-mcp.bridge \
   --distpath "${BUILD_DIR}" \
   --workpath "${BUILD_DIR}/pyinstaller-work" \
@@ -31,12 +40,12 @@ uv run --locked pyinstaller \
   --collect-submodules things3_mcp_bridge \
   "${ENTRYPOINT}" >/dev/null
 
+cp "${PLIST_TEMPLATE}" "${APP_DIR}/Contents/Info.plist"
+cp "${ICON_FILE}" "${APP_DIR}/Contents/Resources/${ICON_RESOURCE_NAME}"
+
 /usr/libexec/PlistBuddy -c "Delete :LSBackgroundOnly" "${APP_DIR}/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "${APP_DIR}/Contents/Info.plist" 2>/dev/null || \
   /usr/libexec/PlistBuddy -c "Set :LSUIElement true" "${APP_DIR}/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :NSAppleEventsUsageDescription string Things3 MCP Bridge needs access to Things 3 in order to read your task and project data for local AI assistants." "${APP_DIR}/Contents/Info.plist" 2>/dev/null || \
-  /usr/libexec/PlistBuddy -c "Set :NSAppleEventsUsageDescription Things3 MCP Bridge needs access to Things 3 in order to read your task and project data for local AI assistants." "${APP_DIR}/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Things3 MCP Bridge" "${APP_DIR}/Contents/Info.plist"
 
 echo "Built ${APP_DIR}"
 cat <<'EOF'
