@@ -150,6 +150,33 @@ def escape_applescript_string(text: str) -> str:
         return f'"{text}"'
 
 
+# Localization for Things' built-in list names.
+#
+# Things exposes its built-in lists to AppleScript under their *localized*
+# names. On a Russian-localized Things, `list "Today"` raises error -1728
+# ("no such list"); the list must be referenced as `list "Сегодня"`.
+# The MCP API keeps the English keys (Today/Anytime/...); this map translates
+# them to the names AppleScript actually understands on this machine.
+# If Things is ever switched to English, set this to an empty dict.
+BUILTIN_LIST_LOCALIZATION = {
+    "Inbox": "Входящие",
+    "Today": "Сегодня",
+    "Anytime": "В любое время",
+    "Someday": "Когда-нибудь",
+    "Trash": "Корзина",
+    "Logbook": "Журнал",
+    "Upcoming": "Запланировано",
+}
+
+
+def localize_list_name(name: str) -> str:
+    """Translate an English built-in list name to Things' localized name.
+
+    Non-built-in names (projects, areas) are returned unchanged.
+    """
+    return BUILTIN_LIST_LOCALIZATION.get(name, name)
+
+
 def add_todo(  # noqa: PLR0913
     title: str,
     notes: str | None = None,
@@ -196,7 +223,7 @@ def add_todo(  # noqa: PLR0913
         properties.append(f"notes:{escape_applescript_string(notes)}")
 
     # Create in Inbox first (simplest approach)
-    script_parts.append(f'set newTodo to make new to do with properties {{{", ".join(properties)}}} at beginning of list "Inbox"')
+    script_parts.append(f'set newTodo to make new to do with properties {{{", ".join(properties)}}} at beginning of list "{localize_list_name("Inbox")}"')
 
     # Handle scheduling using the standardized helper
     _handle_when_scheduling(script_parts, when, "newTodo")
@@ -303,16 +330,16 @@ def _handle_when_scheduling(script_parts: list[str], when: str | None, item_ref:
 
     if when == "today":
         # Move to Today list
-        script_parts.append(f'    move {item_ref} to list "Today"')
+        script_parts.append(f'    move {item_ref} to list "{localize_list_name("Today")}"')
     elif when == "tomorrow":
         # Schedule for tomorrow
         script_parts.append(f"    schedule {item_ref} for (current date) + 1 * days")
     elif when == "anytime":
         # Move to Anytime list
-        script_parts.append(f'    move {item_ref} to list "Anytime"')
+        script_parts.append(f'    move {item_ref} to list "{localize_list_name("Anytime")}"')
     elif when == "someday":
         # Move to Someday list
-        script_parts.append(f'    move {item_ref} to list "Someday"')
+        script_parts.append(f'    move {item_ref} to list "{localize_list_name("Someday")}"')
     elif is_date_format:
         # Schedule for specific date
         try:
@@ -445,9 +472,12 @@ def update_todo(
     # Handle list assignment (built-in lists, projects, or areas)
     if list_name:
         escaped_list = escape_applescript_string(list_name)
+        # Built-in lists resolve only under their localized name (e.g. "Today"
+        # -> "Сегодня"); project/area names pass through unchanged.
+        escaped_builtin = escape_applescript_string(localize_list_name(list_name))
         script_parts.append("    try")
         # First try to find as built-in list
-        script_parts.append(f"        set targetList to list {escaped_list}")
+        script_parts.append(f"        set targetList to list {escaped_builtin}")
         script_parts.append("        move theTodo to targetList")
         script_parts.append("    on error")
         script_parts.append("        try")
@@ -667,8 +697,9 @@ def move_project_to_list(script_parts: list[str], list_name: str, project_ref: s
         logger.warning(f"Invalid list name: {list_name}. Must be one of: {', '.join(valid_lists)}")
         return False
 
-    # Move using the 'move' command instead of setting container
-    script_parts.append(f'    move {project_ref} to list "{list_name}"')
+    # Move using the 'move' command instead of setting container.
+    # Translate to Things' localized list name so the reference resolves.
+    script_parts.append(f'    move {project_ref} to list "{localize_list_name(list_name)}"')
     return True
 
 
